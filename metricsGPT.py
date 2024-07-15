@@ -9,6 +9,7 @@ import urllib.parse
 class MetricsGPT:
     prom_client: prometheus_api_client.PrometheusConnect
     chromadb_collection: chromadb.Collection
+    messages: list
 
     def __init__(
             self,
@@ -16,6 +17,7 @@ class MetricsGPT:
             chromadb_collection: chromadb.Collection):
         self.prom_client = prom_client
         self.chromadb_collection = chromadb_collection
+        self.messages = []
 
     def get_series(
             self,
@@ -60,26 +62,31 @@ class MetricsGPT:
         '''generate_embeddings_for_metrics generates embeddings for all metrics in the Prometheus-compatible TSDB
         using provided embedding model.'''
 
-        all_series = self.get_all_series()
-        metric_doc = []
-        for series_list in all_series:
-            for series in series_list:
-                labelstr = ""
-                for label in series:
-                    if label != "__name__":
-                        labelstr += f"{label}={series[label]}, "
-                metric_doc.append(
-                    f"This Prometheus-compatible TSDB has a metric named {
-                        series["__name__"]} with the following label-value pairs: {labelstr}\n")
+        try:
+            all_series = self.get_all_series()
+            metric_doc = []
+            for series_list in all_series:
+                for series in series_list:
+                    labelstr = ""
+                    for label in series:
+                        if label != "__name__":
+                            labelstr += f"{label}={series[label]}, "
+                    metric_doc.append(
+                        f"This Prometheus-compatible TSDB has a metric named {
+                            series["__name__"]} with the following label-value pairs: {labelstr}\n")
 
-        for i, metric in enumerate(metric_doc):
-            response = ollama.embeddings(prompt=metric, model=embedding_model)
-            embedding = response["embedding"]
-            self.chromadb_collection.add(
-                ids=[str(i)],
-                embeddings=[embedding],
-                documents=[metric],
-            )
+            for i, metric in enumerate(metric_doc):
+                response = ollama.embeddings(
+                    prompt=metric, model=embedding_model)
+                embedding = response["embedding"]
+                self.chromadb_collection.add(
+                    ids=[str(i)],
+                    embeddings=[embedding],
+                    documents=[metric],
+                )
+        except ollama.ResponseError as err:
+            print(
+                f"Response occurred while embedding metrics from Prometheus: {err}")
 
     def query_with_rag(
             self,
@@ -87,27 +94,57 @@ class MetricsGPT:
             embedding_model: str,
             query_model: str) -> str:
         '''query_with_rag generates embedding from the provided prompt and then queries chromadb for
-        using the provided embedding model'''
+        using the provided embedding model. Also provides it with chat history.'''
 
-        response = ollama.embeddings(
-            prompt=prompt,
-            model=embedding_model
-        )
-        results = self.chromadb_collection.query(
-            query_embeddings=[response["embedding"]],
-            n_results=200
-        )
-        data = results['documents'][0][0]
-        output = ollama.generate(
-            model=query_model,
-            prompt=f"""Using the following facts:
-        {data}
-        To respond to this prompt: {prompt}
-        """
-        )
+        try:
+            response = ollama.embeddings(
+                prompt=prompt,
+                model=embedding_model
+            )
+            results = self.chromadb_collection.query(
+                query_embeddings=[response["embedding"]],
+                n_results=200
+            )
+            data = results['documents'][0][0]
 
-        print(output['response'])
-        return output['response']
+            self.messages.append(
+                {
+                    'role': 'user',
+                    'content': f"""Using the following facts:
+            {data}
+            To respond to this prompt: {prompt}
+            """,
+                }
+            )
+
+            stream = ollama.chat(
+                model=query_model,
+                messages=self.messages,
+                stream=True,
+            )
+
+            response = ""
+            for chunk in stream:
+                part = chunk['message']['content']
+                print(part, end='', flush=True)
+                response = response + part
+
+            print("")
+            self.messages.append(
+                {
+                    'role': 'assistant',
+                    'content': response,
+                }
+            )
+
+            return response
+
+        except ollama.ResponseError as err:
+            print(
+                f"Response occurred while embedding metrics from Prometheus or generating response: {err}")
+        except ValueError as err:
+            print(
+                f"Response occurred while querying Chromadb: {err}")
 
 
 def extract_and_urlencode_promql(text):
@@ -179,17 +216,24 @@ def main():
     mgpt = MetricsGPT(prom_client, collection)
     mgpt.generate_embeddings_for_metrics(args.embedding_model)
 
-    prompt = input("Enter your prompt: ")
-    response = mgpt.query_with_rag(
-        prompt, args.embedding_model, args.query_model)
-    queries = extract_and_urlencode_promql(response)
+    while True:
+        prompt = input(">>> ")
 
-    print("\nYou can view these queries here:")
-    for query in queries:
-        if args.prom_external_url is not None:
-            print(f"{args.prom_external_url}/graph?g0.expr={query}\n")
-        else:
-            print(f"{args.prometheus_url}/graph?g0.expr={query}\n")
+        if prompt == "/exit":
+            break
+        elif len(prompt) > 0:
+            response = mgpt.query_with_rag(
+                prompt, args.embedding_model, args.query_model)
+            queries = extract_and_urlencode_promql(response)
+
+            print("\nYou can view these queries here:")
+            for query in queries:
+                if args.prom_external_url is not None:
+                    print(f"{args.prom_external_url}/graph?g0.expr={query}\n")
+                else:
+                    print(f"{args.prometheus_url}/graph?g0.expr={query}\n")
+
+    # TODO(saswatamcode): Analyze query result.
 
 
 if __name__ == "__main__":
