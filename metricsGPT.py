@@ -56,26 +56,18 @@ class MetricsGPT:
             print(
                 f"PrometheusApiClientException occurred while getting series: {err}")
 
-    def generate_embeddings_for_metrics(
-            self,
-            embedding_model: str):
-        '''generate_embeddings_for_metrics generates embeddings for all metrics in the Prometheus-compatible TSDB
-        using provided embedding model.'''
+    def generate_embeddings_for_metrics(self, embedding_model: str):
+        '''generate_embeddings_for_metrics generates embeddings for all metrics in the Prometheus-compatible TSDB using the provided embedding model.'''
 
         try:
             all_series = self.get_all_series()
-            metric_doc = []
-            for series_list in all_series:
-                for series in series_list:
-                    labelstr = ""
-                    for label in series:
-                        if label != "__name__":
-                            labelstr += f"{label}={series[label]}, "
-                    metric_doc.append(
-                        f"This Prometheus-compatible TSDB has a metric named {
-                            series["__name__"]} with the following label-value pairs: {labelstr}\n")
+            metric_docs = [
+                f"This Prometheus-compatible TSDB has a metric named {series['__name__']} with the following label-value pairs: "
+                + ", ".join(f"{label}={series[label]}" for label in series if label != "__name__")
+                for series_list in all_series for series in series_list
+            ]
 
-            for i, metric in enumerate(metric_doc):
+            for i, metric in enumerate(metric_docs):
                 response = ollama.embeddings(
                     prompt=metric, model=embedding_model)
                 embedding = response["embedding"]
