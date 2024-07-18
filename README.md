@@ -63,3 +63,4 @@ and ask it to come up with PromQL queries.
 - Visualize
 - Embed query results for better analysis
 - Run chromadb separately
+- Refresh chromadb based on last mod

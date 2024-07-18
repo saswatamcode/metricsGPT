@@ -301,13 +301,16 @@ def main():
             print("\nYou can view these queries here:")
             for query in urlencoded_queries:
                 if args.prom_external_url is not None:
-                    print(f"{args.prom_external_url}/graph?g0.expr={query}\n")
+                    print(
+                        f"{args.prom_external_url}/graph?g0.expr={query}&g0.range_input={args.query_lookback_hours}h&g0.tab=0\n")
                 else:
-                    print(f"{args.prometheus_url}/graph?g0.expr={query}\n")
+                    print(
+                        f"{args.prometheus_url}/graph?g0.expr={query}&g0.range_input={args.query_lookback_hours}h&g0.tab=0\n")
 
             for query in queries:
                 response = mgpt.query_prom(query, args.query_lookback_hours,
                                            args.query_step)
+                print(response)
                 response_df = prometheus_api_client.MetricRangeDataFrame(
                     response)
                 resp_json = response_df.to_json()

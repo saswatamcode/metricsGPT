@@ -30,4 +30,4 @@ fmt: setup
 run-prom: # Run prometheus
 run-prom:
 	@echo ">> running prometheus in docker at http://localhost:9090"
-	@docker run -d --name prometheus -p 9090:9090 -v $(pwd)/prometheus.yml:/etc/prometheus/prometheus.yml prom/prometheus
+	@docker run -d --name prometheus -p 9090:9090 -v $(shell pwd)/prometheus.yml:/etc/prometheus/prometheus.yml prom/prometheus
