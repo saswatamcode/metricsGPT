@@ -315,14 +315,12 @@ def main():
                 while True:
                     # Create new chat context within one, to focus on query
                     # results
-                    # TODO(saswatamcode): Fix double fire
                     result_prompt = input("result>>> ")
                     if result_prompt == "/done":
                         break
                     elif len(result_prompt) > 0:
-                        query_response = mgpt.query_with_results(
+                        mgpt.query_with_results(
                             query, resp_json, result_prompt, args.query_model)
-                        print(query_response)
 
 
 if __name__ == "__main__":
