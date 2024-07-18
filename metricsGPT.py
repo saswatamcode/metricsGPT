@@ -4,6 +4,7 @@ import chromadb
 import argparse
 import re
 import urllib.parse
+from datetime import datetime, timedelta
 
 
 class MetricsGPT:
@@ -105,6 +106,9 @@ class MetricsGPT:
                     'content': f"""Using the following facts:
             {data}
             To respond to this prompt: {prompt}
+            Make sure to provide the PromQL query between <PROMQL> and </PROMQL> tags.
+            Do not add any new line or space and put both tags on the same line, with the query in between.
+            Make sure there are no characters in the query which can cause errors when URL encoded.
             """,
                 }
             )
@@ -138,15 +142,79 @@ class MetricsGPT:
             print(
                 f"Response occurred while querying Chromadb: {err}")
 
+    def query_with_results(
+            self,
+            query: str,
+            data: str,
+            prompt: str,
+            query_model: str) -> str:
+        '''query_with_results asks LLM to analyze the results of a PromQL query.'''
+        try:
+            self.messages.append(
+                {'role': 'user', 'content': f"""We have queried prometheus with this PromQL query:
+            {query}
 
-def extract_and_urlencode_promql(text):
-    '''extract_and_urlencode_promql extracts all PROMQL code blocks from the LLM response and then URL encodes them.'''
+            And have received the following response in json format:
+            {data}
+
+            Using the PromQL query and the JSON response, reason about what the query result means.
+            Think in SRE-like terms, and try to imagine what the result will look like when graphed.
+            Then based on SRE terminology, and how you imagine this data to look like, respond accurately to this prompt:
+
+            {prompt}
+
+            Do not repeat these instructions, and only respond to the above prompt concisely, and answer exactly what was asked.
+            """, })
+
+            stream = ollama.chat(
+                model=query_model,
+                messages=self.messages,
+                stream=True,
+            )
+
+            response = ""
+            for chunk in stream:
+                part = chunk['message']['content']
+                print(part, end='', flush=True)
+                response = response + part
+
+            print("")
+            self.messages.append(
+                {
+                    'role': 'assistant',
+                    'content': response,
+                }
+            )
+
+            return response
+
+        except ollama.ResponseError as err:
+            print(
+                f"Response occurred while generating response for Prometheus query result analysis: {err}")
+
+    def query_prom(self, query: str, query_lookback_hours: float, step: str):
+        '''query_prom queries the Prometheus-compatible API server with the provided query.'''
+        try:
+            response = self.prom_client.custom_query_range(
+                query,
+                start_time=(
+                    datetime.now() -
+                    timedelta(
+                        hours=query_lookback_hours)),
+                end_time=datetime.now(),
+                step=step)
+            return response
+        except prometheus_api_client.PrometheusApiClientException as err:
+            print(
+                f"PrometheusApiClientException occurred while querying Prometheus: {err}")
+
+
+def extract_promql(text):
+    '''extract_promql extracts all PROMQL code blocks from the LLM response.'''
     pattern = re.compile(r'<PROMQL>(.*?)</PROMQL>', re.DOTALL)
     matches = pattern.findall(text)
 
-    urlencoded_matches = [urllib.parse.quote(match) for match in matches]
-
-    return urlencoded_matches
+    return matches
 
 
 def initialize_ollama_model(modelfile_path: str):
@@ -195,6 +263,16 @@ def main():
         type=str,
         default="./Modelfile",
         help='Path to Ollama Modelfile for metricGPT model.')
+    parser.add_argument(
+        '--query-lookback-hours',
+        type=float,
+        default=1,
+        help='Hours to lookback when executing PromQL queries.')
+    parser.add_argument(
+        '--query_step',
+        type=str,
+        default="14s",
+        help='PromQL range query step.')
 
     args = parser.parse_args()
 
@@ -210,22 +288,41 @@ def main():
 
     while True:
         prompt = input(">>> ")
-
         if prompt == "/exit":
             break
         elif len(prompt) > 0:
             response = mgpt.query_with_rag(
                 prompt, args.embedding_model, args.query_model)
-            queries = extract_and_urlencode_promql(response)
+            queries = extract_promql(response)
+
+            urlencoded_queries = [
+                urllib.parse.quote(query) for query in queries]
 
             print("\nYou can view these queries here:")
-            for query in queries:
+            for query in urlencoded_queries:
                 if args.prom_external_url is not None:
                     print(f"{args.prom_external_url}/graph?g0.expr={query}\n")
                 else:
                     print(f"{args.prometheus_url}/graph?g0.expr={query}\n")
 
-    # TODO(saswatamcode): Analyze query result.
+            for query in queries:
+                response = mgpt.query_prom(query, args.query_lookback_hours,
+                                           args.query_step)
+                response_df = prometheus_api_client.MetricRangeDataFrame(
+                    response)
+                resp_json = response_df.to_json()
+
+                while True:
+                    # Create new chat context within one, to focus on query
+                    # results
+                    # TODO(saswatamcode): Fix double fire
+                    result_prompt = input("result>>> ")
+                    if result_prompt == "/done":
+                        break
+                    elif len(result_prompt) > 0:
+                        query_response = mgpt.query_with_results(
+                            query, resp_json, result_prompt, args.query_model)
+                        print(query_response)
 
 
 if __name__ == "__main__":
