@@ -7,6 +7,7 @@ import urllib.parse
 from datetime import datetime, timedelta
 from yaspin import yaspin
 from yaspin.spinners import Spinners
+from colorama import Fore, init
 
 
 class MetricsGPT:
@@ -126,7 +127,7 @@ class MetricsGPT:
             response = ""
             for chunk in stream:
                 part = chunk['message']['content']
-                print(part, end='', flush=True)
+                print(Fore.BLUE + part, end='', flush=True)
                 response = response + part
 
             print("")
@@ -179,7 +180,7 @@ class MetricsGPT:
             response = ""
             for chunk in stream:
                 part = chunk['message']['content']
-                print(part, end='', flush=True)
+                print(Fore.GREEN + part, end='', flush=True)
                 response = response + part
 
             print("")
@@ -280,6 +281,7 @@ def main():
         help='PromQL range query step parameter.')
 
     args = parser.parse_args()
+    init(autoreset=True)
 
     ascii_art = r'''
                 _        _          _____ ______ _____
@@ -291,12 +293,16 @@ def main():
 
 
 '''
-    print(ascii_art)
+    print(Fore.BLUE + ascii_art)
     initialize_ollama_model(args.modelfile_path)
 
     prom_client = prometheus_api_client.PrometheusConnect(
         url=args.prometheus_url, disable_ssl=True)
-    chromadb_client = chromadb.PersistentClient(path=args.vectordb_path)
+    chromadb_client = chromadb.PersistentClient(
+        path=args.vectordb_path,
+        settings=chromadb.Settings(
+            allow_reset=True))
+    chromadb_client.reset()
     collection = chromadb_client.get_or_create_collection(name="metrics")
 
     mgpt = MetricsGPT(prom_client, collection)
