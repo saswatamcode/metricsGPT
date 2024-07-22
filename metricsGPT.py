@@ -5,6 +5,8 @@ import argparse
 import re
 import urllib.parse
 from datetime import datetime, timedelta
+from yaspin import yaspin
+from yaspin.spinners import Spinners
 
 
 class MetricsGPT:
@@ -57,6 +59,8 @@ class MetricsGPT:
             print(
                 f"PrometheusApiClientException occurred while getting series: {err}")
 
+    @yaspin(spinner=Spinners.moon,
+            text="Creating vectorDB from all exposed metrics...")
     def generate_embeddings_for_metrics(self, embedding_model: str):
         '''generate_embeddings_for_metrics generates embeddings for all metrics in the Prometheus-compatible TSDB using the provided embedding model.'''
 
@@ -217,13 +221,14 @@ def extract_promql(text):
     return matches
 
 
+@yaspin(spinner=Spinners.moon,
+        text="Initializing metricsGPT model from Modelfile...")
 def initialize_ollama_model(modelfile_path: str):
     '''initialize_ollama_model creates a model from the provided Modelfile.'''
     try:
-        for response in ollama.create(
-                model="metricsGPT", path=modelfile_path, stream=True
-        ):
-            print(response["status"])
+        ollama.create(
+            model="metricsGPT", path=modelfile_path, stream=True
+        )
     except ollama.ResponseError as err:
         print(
             f"Response error occurred while creating model from Modelfile: {err}")
