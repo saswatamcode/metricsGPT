@@ -12,21 +12,21 @@ Talk to your metrics with metricsGPT!
 options:
   -h, --help            show this help message and exit
   --prometheus-url PROMETHEUS_URL
-                        URL of the Prometheus-API compatible server. (default: http://localhost:9090)
+                        URL of the Prometheus-API compatible server to query. (default: http://localhost:9090)
   --prom-external-url PROM_EXTERNAL_URL
-                        URL of the Prometheus instance. (default: None)
+                        External URL of the Prometheus-compatible instance, to provide URL links. (default: None)
   --embedding-model EMBEDDING_MODEL
                         Model to use for RAG embeddings for your metrics. (default: nomic-embed-text)
   --query-model QUERY_MODEL
                         Model to use for processing your prompts. (default: metricsGPT)
   --vectordb-path VECTORDB_PATH
-                        Path to persist chromadb storage. (default: ./data)
+                        Path to persist chromadb storage to. (default: ./data)
   --modelfile-path MODELFILE_PATH
-                        Path to Ollama Modelfile for metricGPT model. (default: ./Modelfile)
+                        Path to Ollama Modelfile for metricsGPT model. (default: ./Modelfile)
   --query-lookback-hours QUERY_LOOKBACK_HOURS
                         Hours to lookback when executing PromQL queries. (default: 1)
   --query_step QUERY_STEP
-                        PromQL range query step. (default: 14s)
+                        PromQL range query step parameter. (default: 14s)
 ```
 
 

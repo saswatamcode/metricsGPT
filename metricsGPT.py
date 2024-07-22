@@ -243,11 +243,11 @@ def main():
         '--prometheus-url',
         type=str,
         default="http://localhost:9090",
-        help='URL of the Prometheus-API compatible server.')
+        help='URL of the Prometheus-API compatible server to query.')
     parser.add_argument(
         '--prom-external-url',
         type=str,
-        help='URL of the Prometheus instance.')
+        help='External URL of the Prometheus-compatible instance, to provide URL links.')
     parser.add_argument(
         '--embedding-model',
         type=str,
@@ -262,12 +262,12 @@ def main():
         '--vectordb-path',
         type=str,
         default="./data",
-        help='Path to persist chromadb storage.')
+        help='Path to persist chromadb storage to.')
     parser.add_argument(
         '--modelfile-path',
         type=str,
         default="./Modelfile",
-        help='Path to Ollama Modelfile for metricGPT model.')
+        help='Path to Ollama Modelfile for metricsGPT model.')
     parser.add_argument(
         '--query-lookback-hours',
         type=float,
@@ -277,10 +277,21 @@ def main():
         '--query_step',
         type=str,
         default="14s",
-        help='PromQL range query step.')
+        help='PromQL range query step parameter.')
 
     args = parser.parse_args()
 
+    ascii_art = r'''
+                _        _          _____ ______ _____
+               | |      (_)        |  __ \| ___ \_   _|
+ _ __ ___   ___| |_ _ __ _  ___ ___| |  \/| |_/ / | |
+| '_ ` _ \ / _ \ __| '__| |/ __/ __| | __ |  __/  | |
+| | | | | |  __/ |_| |  | | (__\__ \ |_\ \| |     | |
+|_| |_| |_|\___|\__|_|  |_|\___|___/\____/\_|     \_/
+
+
+'''
+    print(ascii_art)
     initialize_ollama_model(args.modelfile_path)
 
     prom_client = prometheus_api_client.PrometheusConnect(
