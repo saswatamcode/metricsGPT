@@ -2,6 +2,8 @@
 
 Talk to your metrics.
 
+![Demo](./demo.gif)
+
 ```bash
 usage: metricsGPT [-h] [--prometheus-url PROMETHEUS_URL] [--prom-external-url PROM_EXTERNAL_URL] [--embedding-model EMBEDDING_MODEL]
                   [--query-model QUERY_MODEL] [--vectordb-path VECTORDB_PATH] [--modelfile-path MODELFILE_PATH]
