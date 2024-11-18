@@ -20,8 +20,10 @@ from llama_index.core.llms import ChatMessage
 from llama_index.llms.ollama import Ollama
 from llama_index.embeddings.ollama import OllamaEmbedding
 from llama_index.core import Settings
-import threading
-import time
+import streamlit as st
+from streamlit_chat import message
+# import threading
+# import time
 
 
 def get_series(
@@ -119,154 +121,166 @@ def initialize_ollama_model(modelfile_path: str):
         print(f"Response error occurred while creating model from Modelfile: {err}")
 
 
-def refresh_cache_periodically(cache_file: str, prom_client: prometheus_api_client.PrometheusConnect):
-    """Refresh the series cache from Prometheus every 30 minutes."""
-    while True:
-        # Clear the cache by saving an empty list
-        save_cache(cache_file, [])
-        get_all_series(cache_file, prom_client)
-        time.sleep(15)  # Sleep for 30 minutes
+# def refresh_cache_periodically(cache_file: str, prom_client: prometheus_api_client.PrometheusConnect):
+#     """Refresh the series cache from Prometheus every 30 minutes."""
+#     while True:
+#         # Clear the cache by saving an empty list
+#         save_cache(cache_file, [])
+#         get_all_series(cache_file, prom_client)
+#         time.sleep(15)  # Sleep for 30 minutes
 
+
+def initialize_page():
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
+
+def display_chat_history():
+    for i, msg in enumerate(st.session_state.messages):
+        if msg["role"] == "user":
+            message(msg["content"], is_user=True, key=f"msg_{i}")
+        else:
+            message(msg["content"], is_user=False, key=f"msg_{i}")
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Talk to your metrics with metricsGPT!",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    # Must be the first Streamlit command
+    st.set_page_config(page_title="metricsGPT 📊", page_icon="📈")
+    
+    # Then sidebar and other UI elements
+    st.title("metricsGPT 📊 - Chat with Your Metrics!")
+    st.sidebar.title("Configuration")
+    args = type('Args', (), {})()
+    
+    args.prometheus_url = st.sidebar.text_input(
+        "Prometheus URL",
+        value="http://localhost:9090",
+        help="URL of the Prometheus-API compatible server to query."
     )
-    parser.add_argument(
-        "--prometheus-url",
-        type=str,
-        default="http://localhost:9090",
-        help="URL of the Prometheus-API compatible server to query.",
+    args.prom_external_url = st.sidebar.text_input(
+        "External Prometheus URL",
+        help="External URL of the Prometheus-compatible instance, to provide URL links."
     )
-    parser.add_argument(
-        "--prom-external-url",
-        type=str,
-        help="External URL of the Prometheus-compatible instance, to provide URL links.",
+    args.embedding_model = st.sidebar.text_input(
+        "Embedding Model",
+        value="nomic-embed-text",
+        help="Model to use for RAG embeddings for your metrics."
     )
-    parser.add_argument(
-        "--embedding-model",
-        type=str,
-        default="nomic-embed-text",
-        help="Model to use for RAG embeddings for your metrics.",
+    args.query_model = st.sidebar.text_input(
+        "Query Model",
+        value="metricsGPT",
+        help="Model to use for processing your prompts."
     )
-    parser.add_argument(
-        "--query-model",
-        type=str,
-        default="metricsGPT",
-        help="Model to use for processing your prompts.",
+    args.vectordb_path = st.sidebar.text_input(
+        "VectorDB Path",
+        value="./data.db",
+        help="Path to persist Milvus storage to."
     )
-    parser.add_argument(
-        "--vectordb-path",
-        type=str,
-        default="./data.db",
-        help="Path to persist Milvus storage to.",
+    args.modelfile_path = st.sidebar.text_input(
+        "Modelfile Path",
+        value="./Modelfile",
+        help="Path to Ollama Modelfile for metricsGPT model."
     )
-    parser.add_argument(
-        "--modelfile-path",
-        type=str,
-        default="./Modelfile",
-        help="Path to Ollama Modelfile for metricsGPT model.",
+    args.query_lookback_hours = st.sidebar.number_input(
+        "Query Lookback Hours",
+        value=1.0,
+        help="Hours to lookback when executing PromQL queries."
     )
-    parser.add_argument(
-        "--query-lookback-hours",
-        type=float,
-        default=1,
-        help="Hours to lookback when executing PromQL queries.",
+    args.query_step = st.sidebar.text_input(
+        "Query Step",
+        value="14s",
+        help="PromQL range query step parameter."
     )
-    parser.add_argument(
-        "--query_step",
-        type=str,
-        default="14s",
-        help="PromQL range query step parameter.",
-    )
-    parser.add_argument(
-        "--series-cache-file",
-        type=str,
-        default="./series_cache.json",
-        help="Path to the series cache file.",
+    args.series_cache_file = st.sidebar.text_input(
+        "Series Cache File",
+        value="./series_cache.json",
+        help="Path to the series cache file."
     )
     
-    args = parser.parse_args()
-    init(autoreset=True)
-
-    ascii_art = r"""
-                _        _          _____ ______ _____
-               | |      (_)        |  __ \| ___ \_   _|
- _ __ ___   ___| |_ _ __ _  ___ ___| |  \/| |_/ / | |
-| '_ ` _ \ / _ \ __| '__| |/ __/ __| | __ |  __/  | |
-| | | | | |  __/ |_| |  | | (__\__ \ |_\ \| |     | |
-|_| |_| |_|\___|\__|_|  |_|\___|___/\____/\_|     \_/
-
-
-"""
-    print(Fore.BLUE + ascii_art)
-    initialize_ollama_model(args.modelfile_path)
-
+    initialize_page()
+    
+    # Initialize components
     prom_client = prometheus_api_client.PrometheusConnect(
         url=args.prometheus_url, disable_ssl=True
     )
-
+    
     Settings.llm = Ollama(model=args.query_model, request_timeout=120.0)
     Settings.embed_model = OllamaEmbedding(
         model_name=args.embedding_model,
     )
 
+    # Initialize cache and vector store
     cache = load_cache(args.series_cache_file)
     if len(cache) == 0:
-        print("Loading metrics from Prometheus...")
-        get_all_series(args.series_cache_file, prom_client)
-
-    # Start cache refresh thread
-    refresh_thread = threading.Thread(
-        target=refresh_cache_periodically,
-        args=(args.series_cache_file, prom_client),
-        daemon=True
-    )
-    refresh_thread.start()
-
-    cache = load_cache(args.series_cache_file)
+        with st.spinner("Loading metrics from Prometheus..."):
+            get_all_series(args.series_cache_file, prom_client)
+            cache = load_cache(args.series_cache_file)
 
     if not os.path.exists(args.vectordb_path):
-        print("Creating metricsGPT index...")
-        vector_store = MilvusVectorStore(
-            uri=args.vectordb_path, dim=768, overwrite=True, collection_name="metrics"
-        )
-        embed_model = OllamaEmbedding(model_name=args.embedding_model)
+        with st.spinner("Creating metricsGPT index..."):
+            vector_store = MilvusVectorStore(
+                uri=args.vectordb_path, dim=768, overwrite=True, collection_name="metrics"
+            )
+            embed_model = OllamaEmbedding(model_name=args.embedding_model)
 
-        storage_context = StorageContext.from_defaults(vector_store=vector_store)
+            storage_context = StorageContext.from_defaults(vector_store=vector_store)
 
-        # Convert metrics to documents and add to index
-        documents = []
-        for metric in cache:
-            metric_str = f"{metric['__name__']}{{{', '.join(f'{k}={v}' for k, v in metric.items() if k != '__name__')}}}"
-            documents.append(Document(text=metric_str, doc_id=hash_metric(metric)))
+            # Convert metrics to documents and add to index
+            documents = []
+            for metric in cache:
+                metric_str = f"{metric['__name__']}{{{', '.join(f'{k}={v}' for k, v in metric.items() if k != '__name__')}}}"
+                documents.append(Document(text=metric_str, doc_id=hash_metric(metric)))
 
-        index = VectorStoreIndex.from_documents(
-            documents, storage_context=storage_context, embed_model=embed_model
-        )
+            index = VectorStoreIndex.from_documents(
+                documents, storage_context=storage_context, embed_model=embed_model
+            )
 
-        index.set_index_id("metricsGPT")
+            index.set_index_id("metricsGPT")
     else:
-        print("Loading metricsGPT index from disk...")
-        vector_store = MilvusVectorStore(
-            uri=args.vectordb_path, dim=768, overwrite=False, collection_name="metrics"
-        )
-        embed_model = OllamaEmbedding(model_name=args.embedding_model)
+        with st.spinner("Loading metricsGPT index from disk..."):
+            vector_store = MilvusVectorStore(
+                uri=args.vectordb_path, dim=768, overwrite=False, collection_name="metrics"
+            )
+            embed_model = OllamaEmbedding(model_name=args.embedding_model)
 
-        index = VectorStoreIndex.from_vector_store(
-            vector_store=vector_store, embed_model=embed_model
-        )
+            index = VectorStoreIndex.from_vector_store(
+                vector_store=vector_store, embed_model=embed_model
+            )
 
     llm = Ollama(model=args.query_model, request_timeout=120.0)
-    while True:
-        prompt = input(">>> ")
-        if prompt == "/exit":
-            break
-        elif len(prompt) > 0:
+
+    # Create a container for messages
+    messages = st.container(height=500)
+    
+    # Display existing messages
+    for message in st.session_state.messages:
+        with messages.chat_message(message["role"]):
+            st.write(message["content"])
+            
+            # If it's an assistant message with queries, show the Prometheus links
+            if message["role"] == "assistant":
+                queries = extract_promql(message["content"])
+                urlencoded_queries = [urllib.parse.quote(query) for query in queries]
+                
+                if queries:
+                    st.markdown("### View these queries in Prometheus:")
+                    cols = st.columns(len(queries))  # Create columns for buttons
+                    for idx, (query, col) in enumerate(zip(urlencoded_queries, cols)):
+                        base_url = args.prom_external_url or args.prometheus_url
+                        url = f"{base_url}/graph?g0.expr={query}&g0.range_input={args.query_lookback_hours}h&g0.tab=0"
+                        with col:
+                            st.link_button("View Query 📊", url, type="primary", use_container_width=True)
+    
+    # Chat input
+    if prompt := st.chat_input("Ask about your metrics..."):
+        # Display user message
+        with messages.chat_message("user"):
+            st.write(prompt)
+        
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        
+        # Display assistant response
+        with messages.chat_message("assistant"):
             try:
                 data = ""
-
                 response = embed_model.get_text_embedding(prompt)
                 results = index.vector_store.query(
                     VectorStoreQuery(query_embedding=response, similarity_top_k=5)
@@ -275,62 +289,80 @@ def main():
                 for result in results.nodes:
                     data += result.text + "\n"
 
-                print(data)
-
                 messages = []
+                # Get last few messages for context (e.g., last 2 exchanges)
+                chat_history = ""
+                if len(st.session_state.messages) > 0:
+                    recent_messages = st.session_state.messages[-4:]  # Last 2 exchanges (2 user, 2 assistant)
+                    for msg in recent_messages:
+                        role = "User" if msg["role"] == "user" else "Assistant"
+                        chat_history += f"{role}: {msg['content']}\n\n"
 
                 messages.append(
                     ChatMessage(
                         role="user",
-                        content=f"""Assume that the following is a list of metrics that are available to query:
+                        content=f"""First, explain what the query does and how it helps answer the question. Think of yourself as a PromQL Expert SRE.
+                Then, on a new line, provide just the PromQL query between <PROMQL> and </PROMQL> tags.
+                
+                Ensure that,
+                - The PromQL query is valid PromQL and will not cause errors and can actually run.
+                - The PromQL query is URL encodable.
+                - The PromQL query takes into account the upstream and open source best practices and norms for Prometheus.
+                - The PromQL query make reasonable assumptions from the query and the metrics provided as well as their nomenclature.
+                - Ensure that your final PromQL query has balanced brackets and balanced double quotes(when dealing with label selectors)
+                
+                Format your response like this:
+                Your explanation of what the query does and how it helps...
+
+                <PROMQL>your_query_here</PROMQL>
+            
+            
+                Here is some more information below,
+                        
+                Assume that the following is a list of metrics that are available to query within the TSDB (but there can be more). Take this into context when designing the query:
                 {data}
-                To respond to this prompt: {prompt}
-                Make sure to provide the PromQL query between <PROMQL> and </PROMQL> tags.
-                Do not add any new line or space and put both tags on the same line, with the query in between.
-                Make sure there are no characters in the query which can cause errors when URL encoded.
+                
+                Below is an excerpt of the recent conversation. Understand it, and if the user is asking follow-up questions,
+                edit your response accordinly, but do not go beyond the format:
+                {chat_history}
+                
+                And finally here is the user's actual question: {prompt}
                 """,
                     )
                 )
 
-                stream = llm.stream_chat(
-                    messages=messages,
-                )
-
-                
                 response = ""
-                for chunk in stream:
-                    print(Fore.BLUE + chunk.delta, end="", flush=True)
-                    response = response + chunk.delta
-
-                print("")
-                messages.append(
-                    ChatMessage(
-                        role="assistant",
-                        content=response,
-                    )
-                )
-
+                message_placeholder = st.empty()
+                with st.spinner("Thinking..."):
+                    for chunk in llm.stream_chat(messages=messages):
+                        response += chunk.delta
+                        message_placeholder.write(response)
+                
+                # Clear the streaming placeholder
+                message_placeholder.empty()
+                
+                # First display the explanation part
+                explanation = response.split('<PROMQL>')[0].strip()
+                st.write(explanation)
+                
+                # Then display queries in a box
                 queries = extract_promql(response)
-                urlencoded_queries = [urllib.parse.quote(query) for query in queries]
+                if queries:
+                    with st.container(border=True):
+                        for query in queries:
+                            st.code(query.strip(), language="promql")
+                            base_url = args.prom_external_url or args.prometheus_url
+                            url = f"{base_url}/graph?g0.expr={urllib.parse.quote(query)}&g0.range_input={args.query_lookback_hours}h&g0.tab=0"
+                            st.link_button("View Query 📊", url, type="primary", use_container_width=True)
 
-                print("\nYou can view these queries here:")
-                for query in urlencoded_queries:
-                    if args.prom_external_url is not None:
-                        print(
-                            f"{args.prom_external_url}/graph?g0.expr={query}&g0.range_input={args.query_lookback_hours}h&g0.tab=0\n"
-                        )
-                    else:
-                        print(
-                            f"{args.prometheus_url}/graph?g0.expr={query}&g0.range_input={args.query_lookback_hours}h&g0.tab=0\n"
-                        )
+                # Save the sanitized response for history
+                sanitized_response = explanation
+                if queries:
+                    sanitized_response += "\n\n" + "\n".join(queries)
+                st.session_state.messages.append({"role": "assistant", "content": sanitized_response})
 
-            except ollama.ResponseError as err:
-                print(
-                    f"Response occurred while embedding metrics from Prometheus or generating response: {err}"
-                )
-            except ValueError as err:
-                print(f"Response occurred while querying Milvus: {err}")
-
+            except Exception as e:
+                st.error(f"An error occurred: {str(e)}")
 
 if __name__ == "__main__":
     main()
