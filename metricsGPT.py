@@ -1,289 +1,180 @@
 import ollama
 import prometheus_api_client
-import chromadb
 import argparse
 import re
 import urllib.parse
-from datetime import datetime, timedelta
 from yaspin import yaspin
 from yaspin.spinners import Spinners
 from colorama import Fore, init
+import os
+import json
+import hashlib
+from llama_index.core import Document, VectorStoreIndex, StorageContext, load_index_from_storage
+from llama_index.core.vector_stores.types import VectorStoreQuery
+from llama_index.vector_stores.milvus import MilvusVectorStore
+import numpy as np
+from llama_index.llms.ollama import Ollama
+from llama_index.embeddings.ollama import OllamaEmbedding
+from llama_index.core import Settings
+
+Settings.llm = Ollama(model="metricsGPT", request_timeout=120.0)
+Settings.embed_model = ollama_embedding = OllamaEmbedding(
+    model_name="nomic-embed-text",
+)
 
 
-class MetricsGPT:
-    prom_client: prometheus_api_client.PrometheusConnect
-    chromadb_collection: chromadb.Collection
-    messages: list
+def get_series(
+    prom_client: prometheus_api_client.PrometheusConnect, params: dict = None
+):
+    """get_series calls /api/v1/series on a Prometheus-compatible API server."""
 
-    def __init__(
-            self,
-            prom_client: prometheus_api_client.PrometheusConnect,
-            chromadb_collection: chromadb.Collection):
-        self.prom_client = prom_client
-        self.chromadb_collection = chromadb_collection
-        self.messages = []
-
-    def get_series(
-            self,
-            params: dict = None):
-        '''get_series calls /api/v1/series on a Prometheus-compatible API server.'''
-
-        params = params or {}
-        response = self.prom_client._session.get(
-            "{0}/api/v1/series".format(self.prom_client.url),
-            verify=self.prom_client._session.verify,
-            headers=self.prom_client.headers,
-            params=params,
-            auth=self.prom_client.auth,
-            cert=self.prom_client._session.cert,
+    params = params or {}
+    response = prom_client._session.get(
+        "{0}/api/v1/series".format(prom_client.url),
+        verify=prom_client._session.verify,
+        headers=prom_client.headers,
+        params=params,
+        auth=prom_client.auth,
+        cert=prom_client._session.cert,
+    )
+    if response.status_code == 200:
+        series = response.json()["data"]
+    else:
+        raise prometheus_api_client.PrometheusApiClientException(
+            f"/api/v1/series PrometheusApiClientException: HTTP Status Code {response.status_code} ({response.content})"
         )
-        if response.status_code == 200:
-            series = response.json()["data"]
-        else:
-            raise prometheus_api_client.PrometheusApiClientException(
-                "HTTP Status Code {} ({!r})".format(
-                    response.status_code, response.content))
-        return series
+    return series
 
-    def get_all_series(self):
-        '''get_all_series fetches all __name__ labels and then fetches all series for each metric
-        from a Prometheus-compatible API server.'''
 
-        try:
-            all_series = []
-            for metric in self.prom_client.all_metrics():
-                series = self.get_series(params={"match[]": metric})
-                all_series.append(series)
+def get_all_series(
+    cache_file: str, prom_client: prometheus_api_client.PrometheusConnect
+):
+    """get_all_series fetches all __name__ labels and then fetches all series for each metric
+    from a Prometheus-compatible API server."""
 
-            return all_series
-        except prometheus_api_client.PrometheusApiClientException as err:
-            print(
-                f"PrometheusApiClientException occurred while getting series: {err}")
+    try:
+        for metric in prom_client.all_metrics():
+            series_list = get_series(prom_client, params={"match[]": metric})
+            for series in series_list:
+                append_to_cache(cache_file, series)
 
-    @yaspin(spinner=Spinners.moon,
-            text="Creating vectorDB from all exposed metrics...")
-    def generate_embeddings_for_metrics(self, embedding_model: str):
-        '''generate_embeddings_for_metrics generates embeddings for all metrics in the Prometheus-compatible TSDB using the provided embedding model.'''
+    except prometheus_api_client.PrometheusApiClientException as err:
+        print(
+            f"/api/v1/labels PrometheusApiClientException occurred while getting series: {err}"
+        )
 
-        try:
-            all_series = self.get_all_series()
-            metric_docs = [
-                f"This Prometheus-compatible TSDB has a metric named {series['__name__']} with the following label-value pairs: "
-                + ", ".join(f"{label}={series[label]}" for label in series if label != "__name__")
-                for series_list in all_series for series in series_list
-            ]
 
-            for i, metric in enumerate(metric_docs):
-                response = ollama.embeddings(
-                    prompt=metric, model=embedding_model)
-                embedding = response["embedding"]
-                self.chromadb_collection.add(
-                    ids=[str(i)],
-                    embeddings=[embedding],
-                    documents=[metric],
-                )
-        except ollama.ResponseError as err:
-            print(
-                f"Response occurred while embedding metrics from Prometheus: {err}")
+def hash_metric(d: dict) -> str:
+    return hashlib.sha256(str(json.dumps(d, sort_keys=True)).encode()).hexdigest()
 
-    def query_with_rag(
-            self,
-            prompt: str,
-            embedding_model: str,
-            query_model: str) -> str:
-        '''query_with_rag generates embedding from the provided prompt and then queries chromadb for
-        using the provided embedding model. Also provides it with chat history.'''
 
-        try:
-            response = ollama.embeddings(
-                prompt=prompt,
-                model=embedding_model
-            )
-            results = self.chromadb_collection.query(
-                query_embeddings=[response["embedding"]],
-                n_results=200
-            )
-            data = results['documents'][0][0]
+def load_cache(cache_file: str) -> list:
+    """Load cached time series from file as a dictionary."""
+    try:
+        if os.path.exists(cache_file):
+            with open(cache_file, "r") as f:
+                return json.load(f)
+    except Exception as err:
+        print(f"Error loading cache: {err}")
+    return []
 
-            self.messages.append(
-                {
-                    'role': 'user',
-                    'content': f"""Using the following facts:
-            {data}
-            To respond to this prompt: {prompt}
-            Make sure to provide the PromQL query between <PROMQL> and </PROMQL> tags.
-            Do not add any new line or space and put both tags on the same line, with the query in between.
-            Make sure there are no characters in the query which can cause errors when URL encoded.
-            """,
-                }
-            )
 
-            stream = ollama.chat(
-                model=query_model,
-                messages=self.messages,
-                stream=True,
-            )
+def save_cache(cache_file: str, timeseries: list):
+    """Save time series to cache file."""
+    try:
+        with open(cache_file, "w") as f:
+            json.dump(timeseries, f)
+    except Exception as err:
+        print(f"Error saving cache: {err}")
 
-            response = ""
-            for chunk in stream:
-                part = chunk['message']['content']
-                print(Fore.BLUE + part, end='', flush=True)
-                response = response + part
 
-            print("")
-            self.messages.append(
-                {
-                    'role': 'assistant',
-                    'content': response,
-                }
-            )
+def append_to_cache(cache_file: str, series: dict):
+    """Append a series to the cache."""
 
-            return response
+    cache = load_cache(cache_file)
+    to_append = {**series}
 
-        except ollama.ResponseError as err:
-            print(
-                f"Response occurred while embedding metrics from Prometheus or generating response: {err}")
-        except ValueError as err:
-            print(
-                f"Response occurred while querying Chromadb: {err}")
-
-    def query_with_results(
-            self,
-            query: str,
-            data: str,
-            prompt: str,
-            query_model: str) -> str:
-        '''query_with_results asks LLM to analyze the results of a PromQL query.'''
-        try:
-            self.messages.append(
-                {'role': 'user', 'content': f"""We have queried prometheus with this PromQL query:
-            {query}
-
-            And have received the following response in json format:
-            {data}
-
-            Using the PromQL query and the JSON response, reason about what the query result means.
-            Think in SRE-like terms, and try to imagine what the result will look like when graphed.
-            Then based on SRE terminology, and how you imagine this data to look like, respond accurately to this prompt:
-
-            {prompt}
-
-            Do not repeat these instructions, and only respond to the above prompt concisely, and answer exactly what was asked.
-            """, })
-
-            stream = ollama.chat(
-                model=query_model,
-                messages=self.messages,
-                stream=True,
-            )
-
-            response = ""
-            for chunk in stream:
-                part = chunk['message']['content']
-                print(Fore.GREEN + part, end='', flush=True)
-                response = response + part
-
-            print("")
-            self.messages.append(
-                {
-                    'role': 'assistant',
-                    'content': response,
-                }
-            )
-
-            return response
-
-        except ollama.ResponseError as err:
-            print(
-                f"Response occurred while generating response for Prometheus query result analysis: {err}")
-
-    def query_prom(self, query: str, query_lookback_hours: float, step: str):
-        '''query_prom queries the Prometheus-compatible API server with the provided query.'''
-        try:
-            response = self.prom_client.custom_query_range(
-                query,
-                start_time=(
-                    datetime.now() -
-                    timedelta(
-                        hours=query_lookback_hours)),
-                end_time=datetime.now(),
-                step=step)
-            return response
-        except prometheus_api_client.PrometheusApiClientException as err:
-            print(
-                f"PrometheusApiClientException occurred while querying Prometheus: {err}")
+    for metric in cache:
+        if metric == to_append:
+            return
+    cache.append(to_append)
+    save_cache(cache_file, cache)
 
 
 def extract_promql(text):
-    '''extract_promql extracts all PROMQL code blocks from the LLM response.'''
-    pattern = re.compile(r'<PROMQL>(.*?)</PROMQL>', re.DOTALL)
+    """extract_promql extracts all PROMQL code blocks from the LLM response."""
+    pattern = re.compile(r"<PROMQL>(.*?)</PROMQL>", re.DOTALL)
     matches = pattern.findall(text)
 
     return matches
 
 
-@yaspin(spinner=Spinners.moon,
-        text="Initializing metricsGPT model from Modelfile...")
+@yaspin(spinner=Spinners.moon, text="Initializing metricsGPT model from Modelfile...")
 def initialize_ollama_model(modelfile_path: str):
-    '''initialize_ollama_model creates a model from the provided Modelfile.'''
+    """initialize_ollama_model creates a model from the provided Modelfile."""
     try:
-        ollama.create(
-            model="metricsGPT", path=modelfile_path, stream=True
-        )
+        ollama.create(model="metricsGPT", path=modelfile_path, stream=True)
     except ollama.ResponseError as err:
-        print(
-            f"Response error occurred while creating model from Modelfile: {err}")
+        print(f"Response error occurred while creating model from Modelfile: {err}")
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Talk to your metrics with metricsGPT!',
+        description="Talk to your metrics with metricsGPT!",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
-        '--prometheus-url',
+        "--prometheus-url",
         type=str,
         default="http://localhost:9090",
-        help='URL of the Prometheus-API compatible server to query.')
+        help="URL of the Prometheus-API compatible server to query.",
+    )
     parser.add_argument(
-        '--prom-external-url',
+        "--prom-external-url",
         type=str,
-        help='External URL of the Prometheus-compatible instance, to provide URL links.')
+        help="External URL of the Prometheus-compatible instance, to provide URL links.",
+    )
     parser.add_argument(
-        '--embedding-model',
+        "--embedding-model",
         type=str,
         default="nomic-embed-text",
-        help='Model to use for RAG embeddings for your metrics.')
+        help="Model to use for RAG embeddings for your metrics.",
+    )
     parser.add_argument(
-        '--query-model',
+        "--query-model",
         type=str,
         default="metricsGPT",
-        help='Model to use for processing your prompts.')
+        help="Model to use for processing your prompts.",
+    )
     parser.add_argument(
-        '--vectordb-path',
+        "--vectordb-path",
         type=str,
         default="./data",
-        help='Path to persist chromadb storage to.')
+        help="Path to persist chromadb storage to.",
+    )
     parser.add_argument(
-        '--modelfile-path',
+        "--modelfile-path",
         type=str,
         default="./Modelfile",
-        help='Path to Ollama Modelfile for metricsGPT model.')
+        help="Path to Ollama Modelfile for metricsGPT model.",
+    )
     parser.add_argument(
-        '--query-lookback-hours',
+        "--query-lookback-hours",
         type=float,
         default=1,
-        help='Hours to lookback when executing PromQL queries.')
+        help="Hours to lookback when executing PromQL queries.",
+    )
     parser.add_argument(
-        '--query_step',
+        "--query_step",
         type=str,
         default="14s",
-        help='PromQL range query step parameter.')
+        help="PromQL range query step parameter.",
+    )
 
     args = parser.parse_args()
     init(autoreset=True)
 
-    ascii_art = r'''
+    ascii_art = r"""
                 _        _          _____ ______ _____
                | |      (_)        |  __ \| ___ \_   _|
  _ __ ___   ___| |_ _ __ _  ___ ___| |  \/| |_/ / | |
@@ -292,60 +183,125 @@ def main():
 |_| |_| |_|\___|\__|_|  |_|\___|___/\____/\_|     \_/
 
 
-'''
+"""
     print(Fore.BLUE + ascii_art)
     initialize_ollama_model(args.modelfile_path)
 
     prom_client = prometheus_api_client.PrometheusConnect(
-        url=args.prometheus_url, disable_ssl=True)
-    chromadb_client = chromadb.PersistentClient(
-        path=args.vectordb_path,
-        settings=chromadb.Settings(
-            allow_reset=True))
-    chromadb_client.reset()
-    collection = chromadb_client.get_or_create_collection(name="metrics")
+        url=args.prometheus_url, disable_ssl=True
+    )
 
-    mgpt = MetricsGPT(prom_client, collection)
-    mgpt.generate_embeddings_for_metrics(args.embedding_model)
+    cache = load_cache("./series_cache.json")
+    if len(cache) == 0:
+        print("Loading metrics from Prometheus...")
+        get_all_series("./series_cache.json", prom_client)
+
+    cache = load_cache("./series_cache.json")
+        
+    
+    if not os.path.exists("./data.db"):
+        print("Creating metricsGPT index...")
+        vector_store = MilvusVectorStore(uri="./data.db", dim=768, overwrite=True, collection_name="metrics")
+        embed_model = OllamaEmbedding(model_name="nomic-embed-text")
+
+        storage_context = StorageContext.from_defaults(vector_store=vector_store)
+        
+        # Convert metrics to documents and add to index
+        documents = []
+        for metric in cache:
+            metric_str = f"{metric['__name__']}{{{', '.join(f'{k}={v}' for k, v in metric.items() if k != '__name__')}}}"
+            documents.append(Document(text=metric_str, doc_id=hash_metric(metric)))
+
+        index = VectorStoreIndex.from_documents(
+            documents, storage_context=storage_context, embed_model=embed_model
+        )
+        
+        index.set_index_id("metricsGPT")        
+    else:
+        print("Loading metricsGPT index from disk...")
+        vector_store = MilvusVectorStore(uri="./data.db", dim=768, overwrite=False, collection_name="metrics")
+        embed_model = OllamaEmbedding(model_name="nomic-embed-text")
+        
+        index = VectorStoreIndex.from_vector_store(vector_store=vector_store, embed_model=embed_model)        
 
     while True:
         prompt = input(">>> ")
         if prompt == "/exit":
             break
         elif len(prompt) > 0:
-            response = mgpt.query_with_rag(
-                prompt, args.embedding_model, args.query_model)
-            queries = extract_promql(response)
+            try:
+                data = ""
 
-            urlencoded_queries = [
-                urllib.parse.quote(query) for query in queries]
-
-            print("\nYou can view these queries here:")
-            for query in urlencoded_queries:
-                if args.prom_external_url is not None:
-                    print(
-                        f"{args.prom_external_url}/graph?g0.expr={query}&g0.range_input={args.query_lookback_hours}h&g0.tab=0\n")
-                else:
-                    print(
-                        f"{args.prometheus_url}/graph?g0.expr={query}&g0.range_input={args.query_lookback_hours}h&g0.tab=0\n")
-
-            for query in queries:
-                response = mgpt.query_prom(query, args.query_lookback_hours,
-                                           args.query_step)
+                response = ollama_embedding.get_text_embedding(prompt)
                 print(response)
-                response_df = prometheus_api_client.MetricRangeDataFrame(
-                    response)
-                resp_json = response_df.to_json()
+                results = index.vector_store.query(
+                    VectorStoreQuery(query_embedding=response, similarity_top_k=5)
+                )
 
-                while True:
-                    # Create new chat context within one, to focus on query
-                    # results
-                    result_prompt = input("result>>> ")
-                    if result_prompt == "/done":
-                        break
-                    elif len(result_prompt) > 0:
-                        mgpt.query_with_results(
-                            query, resp_json, result_prompt, args.query_model)
+                for result in results.nodes:
+                    data += result.text + "\n"
+
+                print(data)
+
+                messages = []
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": f"""Assume that the following is a list of metrics that are available to query:
+                {data}
+                To respond to this prompt: {prompt}
+                Make sure to provide the PromQL query between <PROMQL> and </PROMQL> tags.
+                Do not add any new line or space and put both tags on the same line, with the query in between.
+                Make sure there are no characters in the query which can cause errors when URL encoded.
+                """,
+                    }
+                )
+                
+                # Ollama.chat(
+                #     messages=messages,
+                #     stream=True,
+                # )
+
+                stream = ollama.chat(
+                    model=args.query_model,
+                    messages=messages,
+                    stream=True,
+                )
+
+                response = ""
+                for chunk in stream:
+                    part = chunk["message"]["content"]
+                    print(Fore.BLUE + part, end="", flush=True)
+                    response = response + part
+
+                print("")
+                messages.append(
+                    {
+                        "role": "assistant",
+                        "content": response,
+                    }
+                )
+
+                queries = extract_promql(response)
+                urlencoded_queries = [urllib.parse.quote(query) for query in queries]
+
+                print("\nYou can view these queries here:")
+                for query in urlencoded_queries:
+                    if args.prom_external_url is not None:
+                        print(
+                            f"{args.prom_external_url}/graph?g0.expr={query}&g0.range_input={args.query_lookback_hours}h&g0.tab=0\n"
+                        )
+                    else:
+                        print(
+                            f"{args.prometheus_url}/graph?g0.expr={query}&g0.range_input={args.query_lookback_hours}h&g0.tab=0\n"
+                        )
+
+            except ollama.ResponseError as err:
+                print(
+                    f"Response occurred while embedding metrics from Prometheus or generating response: {err}"
+                )
+            except ValueError as err:
+                print(f"Response occurred while querying Milvus: {err}")
 
 
 if __name__ == "__main__":
