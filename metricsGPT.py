@@ -9,18 +9,19 @@ from colorama import Fore, init
 import os
 import json
 import hashlib
-from llama_index.core import Document, VectorStoreIndex, StorageContext, load_index_from_storage
+from llama_index.core import (
+    Document,
+    VectorStoreIndex,
+    StorageContext,
+)
 from llama_index.core.vector_stores.types import VectorStoreQuery
 from llama_index.vector_stores.milvus import MilvusVectorStore
-import numpy as np
+from llama_index.core.llms import ChatMessage
 from llama_index.llms.ollama import Ollama
 from llama_index.embeddings.ollama import OllamaEmbedding
 from llama_index.core import Settings
-
-Settings.llm = Ollama(model="metricsGPT", request_timeout=120.0)
-Settings.embed_model = ollama_embedding = OllamaEmbedding(
-    model_name="nomic-embed-text",
-)
+import threading
+import time
 
 
 def get_series(
@@ -118,6 +119,15 @@ def initialize_ollama_model(modelfile_path: str):
         print(f"Response error occurred while creating model from Modelfile: {err}")
 
 
+def refresh_cache_periodically(cache_file: str, prom_client: prometheus_api_client.PrometheusConnect):
+    """Refresh the series cache from Prometheus every 30 minutes."""
+    while True:
+        # Clear the cache by saving an empty list
+        save_cache(cache_file, [])
+        get_all_series(cache_file, prom_client)
+        time.sleep(15)  # Sleep for 30 minutes
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Talk to your metrics with metricsGPT!",
@@ -149,8 +159,8 @@ def main():
     parser.add_argument(
         "--vectordb-path",
         type=str,
-        default="./data",
-        help="Path to persist chromadb storage to.",
+        default="./data.db",
+        help="Path to persist Milvus storage to.",
     )
     parser.add_argument(
         "--modelfile-path",
@@ -170,7 +180,13 @@ def main():
         default="14s",
         help="PromQL range query step parameter.",
     )
-
+    parser.add_argument(
+        "--series-cache-file",
+        type=str,
+        default="./series_cache.json",
+        help="Path to the series cache file.",
+    )
+    
     args = parser.parse_args()
     init(autoreset=True)
 
@@ -191,21 +207,35 @@ def main():
         url=args.prometheus_url, disable_ssl=True
     )
 
-    cache = load_cache("./series_cache.json")
+    Settings.llm = Ollama(model=args.query_model, request_timeout=120.0)
+    Settings.embed_model = OllamaEmbedding(
+        model_name=args.embedding_model,
+    )
+
+    cache = load_cache(args.series_cache_file)
     if len(cache) == 0:
         print("Loading metrics from Prometheus...")
-        get_all_series("./series_cache.json", prom_client)
+        get_all_series(args.series_cache_file, prom_client)
 
-    cache = load_cache("./series_cache.json")
-        
-    
-    if not os.path.exists("./data.db"):
+    # Start cache refresh thread
+    refresh_thread = threading.Thread(
+        target=refresh_cache_periodically,
+        args=(args.series_cache_file, prom_client),
+        daemon=True
+    )
+    refresh_thread.start()
+
+    cache = load_cache(args.series_cache_file)
+
+    if not os.path.exists(args.vectordb_path):
         print("Creating metricsGPT index...")
-        vector_store = MilvusVectorStore(uri="./data.db", dim=768, overwrite=True, collection_name="metrics")
-        embed_model = OllamaEmbedding(model_name="nomic-embed-text")
+        vector_store = MilvusVectorStore(
+            uri=args.vectordb_path, dim=768, overwrite=True, collection_name="metrics"
+        )
+        embed_model = OllamaEmbedding(model_name=args.embedding_model)
 
         storage_context = StorageContext.from_defaults(vector_store=vector_store)
-        
+
         # Convert metrics to documents and add to index
         documents = []
         for metric in cache:
@@ -215,15 +245,20 @@ def main():
         index = VectorStoreIndex.from_documents(
             documents, storage_context=storage_context, embed_model=embed_model
         )
-        
-        index.set_index_id("metricsGPT")        
+
+        index.set_index_id("metricsGPT")
     else:
         print("Loading metricsGPT index from disk...")
-        vector_store = MilvusVectorStore(uri="./data.db", dim=768, overwrite=False, collection_name="metrics")
-        embed_model = OllamaEmbedding(model_name="nomic-embed-text")
-        
-        index = VectorStoreIndex.from_vector_store(vector_store=vector_store, embed_model=embed_model)        
+        vector_store = MilvusVectorStore(
+            uri=args.vectordb_path, dim=768, overwrite=False, collection_name="metrics"
+        )
+        embed_model = OllamaEmbedding(model_name=args.embedding_model)
 
+        index = VectorStoreIndex.from_vector_store(
+            vector_store=vector_store, embed_model=embed_model
+        )
+
+    llm = Ollama(model=args.query_model, request_timeout=120.0)
     while True:
         prompt = input(">>> ")
         if prompt == "/exit":
@@ -232,8 +267,7 @@ def main():
             try:
                 data = ""
 
-                response = ollama_embedding.get_text_embedding(prompt)
-                print(response)
+                response = embed_model.get_text_embedding(prompt)
                 results = index.vector_store.query(
                     VectorStoreQuery(query_embedding=response, similarity_top_k=5)
                 )
@@ -244,42 +278,36 @@ def main():
                 print(data)
 
                 messages = []
+
                 messages.append(
-                    {
-                        "role": "user",
-                        "content": f"""Assume that the following is a list of metrics that are available to query:
+                    ChatMessage(
+                        role="user",
+                        content=f"""Assume that the following is a list of metrics that are available to query:
                 {data}
                 To respond to this prompt: {prompt}
                 Make sure to provide the PromQL query between <PROMQL> and </PROMQL> tags.
                 Do not add any new line or space and put both tags on the same line, with the query in between.
                 Make sure there are no characters in the query which can cause errors when URL encoded.
                 """,
-                    }
+                    )
                 )
-                
-                # Ollama.chat(
-                #     messages=messages,
-                #     stream=True,
-                # )
 
-                stream = ollama.chat(
-                    model=args.query_model,
+                stream = llm.stream_chat(
                     messages=messages,
-                    stream=True,
                 )
 
+                
                 response = ""
                 for chunk in stream:
-                    part = chunk["message"]["content"]
-                    print(Fore.BLUE + part, end="", flush=True)
-                    response = response + part
+                    print(Fore.BLUE + chunk.delta, end="", flush=True)
+                    response = response + chunk.delta
 
                 print("")
                 messages.append(
-                    {
-                        "role": "assistant",
-                        "content": response,
-                    }
+                    ChatMessage(
+                        role="assistant",
+                        content=response,
+                    )
                 )
 
                 queries = extract_promql(response)
