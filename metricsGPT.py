@@ -26,6 +26,9 @@ from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
 from contextlib import asynccontextmanager
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+import sys
 
 
 PROMPT_TEMPLATE = """First, explain what the query does and how it helps answer the question. Think of yourself as a PromQL Expert SRE.
@@ -295,6 +298,16 @@ class MetricsGPTServer:
             allow_methods=["*"],
             allow_headers=["*"],
         )
+        # Determine the base path for static files
+        if getattr(sys, 'frozen', False):
+            # Running in PyInstaller bundle
+            self.static_dir = os.path.join(sys._MEIPASS, "ui/build")
+        else:
+            # Running in normal Python environment
+            self.static_dir = os.path.join(os.path.dirname(__file__), "ui", "build")
+            
+        if os.path.exists(self.static_dir):
+            self.fastapi_app.mount("/static", StaticFiles(directory=os.path.join(self.static_dir, "static")), name="static")
         self.setup_routes()
         self.shutdown_event = asyncio.Event()
 
@@ -322,6 +335,16 @@ class MetricsGPTServer:
         await self.vector_store_manager.initialize(cache)
 
     def setup_routes(self):
+        # Add root route to serve index.html
+        @self.fastapi_app.get("/")
+        async def serve_spa():
+            return FileResponse(os.path.join(self.static_dir, "index.html"))
+            
+        @self.fastapi_app.get("/{catch_all:path}")
+        async def serve_spa_catch_all(catch_all: str):
+            return FileResponse(os.path.join(self.static_dir, "index.html"))
+
+        # Existing chat endpoint
         self.fastapi_app.post("/chat")(self.chat_endpoint)
 
     async def refresh_data(self):
