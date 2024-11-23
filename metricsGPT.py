@@ -1,4 +1,3 @@
-import ollama
 import prometheus_api_client
 import argparse
 import re
@@ -18,18 +17,54 @@ from llama_index.core.llms import ChatMessage
 from llama_index.llms.ollama import Ollama
 from llama_index.embeddings.ollama import OllamaEmbedding
 from llama_index.core import Settings
-from flask import Flask, Response, request, jsonify
-from flask_cors import CORS
-import threading
-import time
 import logging
 import traceback
+import uvicorn
+import asyncio
+import aioconsole
+from fastapi import FastAPI, Request
+from fastapi.responses import StreamingResponse
+from contextlib import asynccontextmanager
+from fastapi.middleware.cors import CORSMiddleware
+
+
+PROMPT_TEMPLATE = """First, explain what the query does and how it helps answer the question. Think of yourself as a PromQL Expert SRE.
+Then, on a new line, provide just the PromQL query between <PROMQL> and </PROMQL> tags.
+
+Ensure that,
+- The PromQL query is valid PromQL and will not cause errors and can actually run.
+- The PromQL query is URL encodable.
+- The PromQL query takes into account the upstream and open source best practices and norms for Prometheus.
+- The PromQL query make reasonable assumptions from the query and the metrics provided as well as their nomenclature.
+- Ensure that your final PromQL query has balanced brackets and balanced double quotes(when dealing with label selectors)
+
+Format your response like this:
+Your explanation of what the query does and how it helps...
+
+<PROMQL>your_query_here</PROMQL>
+
+
+Here is some more information below,
+        
+Assume that the following is a list of metrics that are available to query within the TSDB (but there can be more). Take this into context when designing the query:
+{data}
+
+Below is an excerpt of the recent conversation. Understand it, and if the user is asking follow-up questions,
+edit your response accordinly, but do not go beyond the format:
+{chat_history}
+
+And finally here is the user's actual question: {prompt}
+"""
 
 
 class LogfmtFormatter(logging.Formatter):
     """
     A formatter to emit log messages in logfmt format, including labels and stack traces.
     """
+
+    DEFAULT_FORMAT = (
+        "level=%(levelname)s time=%(asctime)s component=%(name)s message=%(message)s"
+    )
 
     def __init__(self, *args, **kwargs):
         """
@@ -62,9 +97,19 @@ class LogfmtFormatter(logging.Formatter):
             if value is not None
         )
 
+    @staticmethod
+    def setup_logging(level=logging.INFO):
+        """Configure basic logging with LogfmtFormatter."""
+        logging.basicConfig(
+            level=level,
+            handlers=[logging.StreamHandler()],
+            format=LogfmtFormatter.DEFAULT_FORMAT,
+        )
+
 
 def create_logger(component_name: str):
     logger = logging.getLogger(component_name)
+    logger.handlers.clear()
     handler = logging.StreamHandler()
     formatter = LogfmtFormatter()
     handler.setFormatter(formatter)
@@ -118,7 +163,7 @@ class PrometheusClient:
         self.client = prometheus_api_client.PrometheusConnect(url=url, disable_ssl=True)
         self.logger = logger
 
-    def get_series(self, params: dict = None) -> list:
+    async def get_series(self, params: dict = None) -> list:
         """get_series calls /api/v1/series on a Prometheus-compatible API server."""
         params = params or {}
         response = self.client._session.get(
@@ -135,12 +180,12 @@ class PrometheusClient:
             f"/api/v1/series PrometheusApiClientException: HTTP Status Code {response.status_code} ({response.content})"
         )
 
-    def get_all_series(self, cache_handler: MetricsCache) -> None:
+    async def get_all_series(self, cache_handler: MetricsCache) -> None:
         """Fetches all metrics and their series from Prometheus."""
         try:
             self.logger.info("Fetching all metrics")
             for metric in self.client.all_metrics():
-                series_list = self.get_series(params={"match[]": metric})
+                series_list = await self.get_series(params={"match[]": metric})
                 for series in series_list:
                     cache_handler.append(series)
         except prometheus_api_client.PrometheusApiClientException as err:
@@ -157,43 +202,45 @@ class VectorStoreManager:
         self.embed_model = embed_model
         self.vector_store = None
         self.index = None
-        self.lock = threading.Lock()
+        self.lock = asyncio.Lock()
         self.logger = logger
 
-    def initialize(self, cache: list) -> None:
+    async def initialize(self, cache: list) -> None:
         """Initialize or load the vector store."""
         self.logger.info("Initializing vector store")
         if not os.path.exists(self.vectordb_path):
-            self._create_new_index(cache)
+            await self._create_new_index(cache)
         else:
-            self._load_existing_index()
+            await self._load_existing_index()
 
-    def _create_new_index(self, cache: list) -> None:
+    async def _create_new_index(self, cache: list) -> None:
         self.logger.info("Creating new index")
         self.vector_store = MilvusVectorStore(
             uri=self.vectordb_path, dim=768, overwrite=True, collection_name="metrics"
         )
         storage_context = StorageContext.from_defaults(vector_store=self.vector_store)
         documents = self._create_documents(cache)
-        with self.lock:
+        async with self.lock:
             self.index = VectorStoreIndex.from_documents(
                 documents, storage_context=storage_context, embed_model=self.embed_model
             )
+            self.logger.info("New index created successfully")
 
-    def refresh_embeddings(self, cache: list) -> None:
+    async def refresh_embeddings(self, cache: list) -> None:
         """Refresh the vector store with updated metrics."""
         self.logger.info("Refreshing vector store embeddings...")
-        self._create_new_index(cache)
+        await self._create_new_index(cache)
 
-    def _load_existing_index(self) -> None:
-        self.logger.info("Loading existing index")
+    async def _load_existing_index(self) -> None:
+        self.logger.info("Loading existing index from disk")
         self.vector_store = MilvusVectorStore(
             uri=self.vectordb_path, dim=768, overwrite=False, collection_name="metrics"
         )
-        with self.lock:
+        async with self.lock:
             self.index = VectorStoreIndex.from_vector_store(
                 vector_store=self.vector_store, embed_model=self.embed_model
             )
+            self.logger.info("Existing index loaded successfully")
 
     @staticmethod
     def _create_documents(cache: list) -> list:
@@ -214,9 +261,6 @@ def extract_promql(text):
     matches = pattern.findall(text)
 
     return matches
-
-
-app = Flask(__name__)
 
 
 class MetricsGPTServer:
@@ -243,29 +287,134 @@ class MetricsGPTServer:
         self.prom_external_url = prom_external_url
         self.query_lookback_hours = query_lookback_hours
         self.logger = logger
+        self.fastapi_app = FastAPI(lifespan=self.lifespan)
+        self.fastapi_app.add_middleware(
+            CORSMiddleware,
+            allow_origins=["*"],
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
+        self.setup_routes()
+        self.shutdown_event = asyncio.Event()
 
-    def initialize(self):
+    @asynccontextmanager
+    async def lifespan(self, app: FastAPI):
+        # Start the refresh task
+        refresh_task = asyncio.create_task(self.refresh_data_server())
+        try:
+            yield
+        finally:
+            # Cleanup: Cancel the refresh task when shutting down
+            self.shutdown_event.set()
+            refresh_task.cancel()
+            try:
+                await refresh_task
+            except asyncio.CancelledError:
+                pass
+
+    async def initialize(self):
         cache = self.metrics_cache.load()
         if len(cache) == 0:
             self.logger.info("No cache found, fetching all series from Prometheus...")
-            self.prometheus.get_all_series(self.metrics_cache)
+            await self.prometheus.get_all_series(self.metrics_cache)
             cache = self.metrics_cache.load()
+        await self.vector_store_manager.initialize(cache)
 
-        self.vector_store_manager.initialize(cache)
+    def setup_routes(self):
+        self.fastapi_app.post("/chat")(self.chat_endpoint)
 
-    def refresh_data(self):
+    async def refresh_data(self):
         while True:
-            time.sleep(30)  # Sleep for 5 minutes
-            self.logger.info("Refreshing metrics cache and embeddings...")
-            self.prometheus.get_all_series(self.metrics_cache)
-            updated_cache = self.metrics_cache.load()
-            self.vector_store_manager.refresh_embeddings(updated_cache)
+            try:
+                await asyncio.sleep(30)
+                self.logger.info("Refreshing metrics cache and embeddings...")
+                await self.prometheus.get_all_series(self.metrics_cache)
+                updated_cache = self.metrics_cache.load()
+                await self.vector_store_manager.refresh_embeddings(updated_cache)
+            except Exception as e:
+                self.logger.error(
+                    "Error in refresh_data", extra={"error": str(e)}, exc_info=True
+                )
+                await asyncio.sleep(5)  # Wait a bit before retrying if there's an error
 
-    def chat(self):
+    async def refresh_data_server(self):
+        while not self.shutdown_event.is_set():
+            try:
+                await asyncio.sleep(30)
+                self.logger.info("Refreshing metrics cache and embeddings...")
+                await self.prometheus.get_all_series(self.metrics_cache)
+                updated_cache = self.metrics_cache.load()
+                await self.vector_store_manager.refresh_embeddings(updated_cache)
+            except Exception as e:
+                if not self.shutdown_event.is_set():  # Only log if not shutting down
+                    self.logger.error(
+                        "Error in refresh_data", extra={"error": str(e)}, exc_info=True
+                    )
+                    await asyncio.sleep(5)
+
+    async def chat_endpoint(self, request: Request):
+        try:
+            data = await request.json()
+            prompt = data.get("message", "")
+
+            if not prompt:
+                return {"error": "Message is required"}, 400
+
+            async def generate():
+                data = ""
+                response = self.embed_model.get_text_embedding(prompt)
+                async with self.vector_store_manager.lock:
+                    results = self.vector_store_manager.index.vector_store.query(
+                        VectorStoreQuery(query_embedding=response, similarity_top_k=5)
+                    )
+
+                    for result in results.nodes:
+                        data += result.text + "\n"
+
+                chat_messages = [
+                    ChatMessage(
+                        role="user",
+                        content=PROMPT_TEMPLATE.format(
+                            data=data,
+                            chat_history="",  # For now, not maintaining chat history in API mode
+                            prompt=prompt,
+                        ),
+                    )
+                ]
+
+                # Stream the main response
+                full_response = ""
+                for chunk in self.llm.stream_chat(messages=chat_messages):
+                    full_response += chunk.delta
+                    yield json.dumps({"type": "content", "data": chunk.delta}) + "\n"
+
+                # Extract and send Prometheus links
+                queries = extract_promql(full_response)
+                if queries:
+                    prometheus_links = []
+                    for query in queries:
+                        base_url = self.prom_external_url or self.prometheus_url
+                        url = f"{base_url}/graph?g0.expr={urllib.parse.quote(query)}&g0.range_input={self.query_lookback_hours}h&g0.tab=0"
+                        prometheus_links.append(url)
+
+                    yield json.dumps(
+                        {"type": "prometheus_links", "data": prometheus_links}
+                    ) + "\n"
+
+            return StreamingResponse(generate(), media_type="application/x-ndjson")
+
+        except Exception as e:
+            self.logger.error(
+                "Chat endpoint error", extra={"error": str(e)}, exc_info=True
+            )
+            return {"error": str(e)}, 500
+
+    async def chat(self):
         messages = []
         while True:
             try:
-                prompt = input(
+                prompt = await aioconsole.ainput(
                     f"{Fore.GREEN}Ask about your metrics (or 'exit' to quit): {Fore.RESET}"
                 )
                 if prompt.lower() == "exit":
@@ -273,7 +422,7 @@ class MetricsGPTServer:
 
                 data = ""
                 response = self.embed_model.get_text_embedding(prompt)
-                with self.vector_store_manager.lock:
+                async with self.vector_store_manager.lock:
                     results = self.vector_store_manager.index.vector_store.query(
                         VectorStoreQuery(query_embedding=response, similarity_top_k=5)
                     )
@@ -292,52 +441,26 @@ class MetricsGPTServer:
                 chat_messages.append(
                     ChatMessage(
                         role="user",
-                        content=f"""First, explain what the query does and how it helps answer the question. Think of yourself as a PromQL Expert SRE.
-                Then, on a new line, provide just the PromQL query between <PROMQL> and </PROMQL> tags.
-                
-                Ensure that,
-                - The PromQL query is valid PromQL and will not cause errors and can actually run.
-                - The PromQL query is URL encodable.
-                - The PromQL query takes into account the upstream and open source best practices and norms for Prometheus.
-                - The PromQL query make reasonable assumptions from the query and the metrics provided as well as their nomenclature.
-                - Ensure that your final PromQL query has balanced brackets and balanced double quotes(when dealing with label selectors)
-                
-                Format your response like this:
-                Your explanation of what the query does and how it helps...
-
-                <PROMQL>your_query_here</PROMQL>
-            
-            
-                Here is some more information below,
-                        
-                Assume that the following is a list of metrics that are available to query within the TSDB (but there can be more). Take this into context when designing the query:
-                {data}
-                
-                Below is an excerpt of the recent conversation. Understand it, and if the user is asking follow-up questions,
-                edit your response accordinly, but do not go beyond the format:
-                {chat_history}
-                
-                And finally here is the user's actual question: {prompt}
-                """,
+                        content=PROMPT_TEMPLATE.format(
+                            data=data, chat_history=chat_history, prompt=prompt
+                        ),
                     )
                 )
 
                 response = ""
                 for chunk in self.llm.stream_chat(messages=chat_messages):
                     response += chunk.delta
-
-                # Print response
-                print(f"\n{Fore.BLUE}Assistant:{Fore.RESET}")
-                print(response)
+                await aioconsole.aprint(f"\n{Fore.BLUE}Assistant:{Fore.RESET}")
+                await aioconsole.aprint(response)
 
                 # Print Prometheus links
                 queries = extract_promql(response)
                 if queries:
-                    print("\nView these queries in Prometheus:")
+                    await aioconsole.aprint("\nView these queries in Prometheus:")
                     for i, query in enumerate(queries, 1):
                         base_url = self.prom_external_url or self.prometheus_url
                         url = f"{base_url}/graph?g0.expr={urllib.parse.quote(query)}&g0.range_input={self.query_lookback_hours}h&g0.tab=0"
-                        print(f"{i}. {url}")
+                        await aioconsole.aprint(f"{i}. {url}")
 
                 # Store message history
                 messages.append({"role": "user", "content": prompt})
@@ -349,39 +472,7 @@ class MetricsGPTServer:
                 )
 
 
-# @app.route("/chat", methods=["POST"])
-# def chat():
-#     try:
-#         data = request.json
-#         user_message = data.get("message", "")
-
-#         if not user_message:
-#             return jsonify({"error": "Message is required"}), 400
-
-#         # Generator to stream responses
-#         def generate():
-
-
-#             response = openai.ChatCompletion.create(
-#                 model="gpt-3.5-turbo",
-#                 messages=[{"role": "user", "content": user_message}],
-#                 stream=True  # Enable streaming
-#             )
-
-#             for chunk in response:
-#                 if "choices" in chunk and len(chunk["choices"]) > 0:
-#                     content = chunk["choices"][0].get("delta", {}).get("content", "")
-#                     if content:
-#                         yield f"data: {content}\n\n"
-
-#         # Use a streaming response with the appropriate content type
-#         return Response(generate(), content_type="text/event-stream")
-
-#     except Exception as e:
-#         return jsonify({"error": str(e)}), 500
-
-
-def main():
+async def main():
     # Set up argument parser
     parser = argparse.ArgumentParser(description="metricsGPT - Chat with Your Metrics!")
     parser.add_argument(
@@ -427,8 +518,14 @@ def main():
         default="./series_cache.json",
         help="Path to the series cache file.",
     )
+    parser.add_argument(
+        "--server",
+        action="store_true",
+        help="Run in server mode instead of CLI chat mode",
+    )
 
     args = parser.parse_args()
+    logger = create_logger("metrics_gpt_server")
 
     Settings.llm = Ollama(model=args.query_model, request_timeout=120.0)
     Settings.embed_model = OllamaEmbedding(
@@ -453,18 +550,55 @@ def main():
         args.prometheus_url,
         args.prom_external_url,
         args.query_lookback_hours,
-        create_logger("metrics_gpt_server"),
+        logger,
     )
-    metrics_gpt_server.initialize()
+    await metrics_gpt_server.initialize()
 
-    refresh_thread = threading.Thread(
-        target=metrics_gpt_server.refresh_data, daemon=True
-    )
-    refresh_thread.start()
+    if args.server:
+        # Run in server mode
+        logger.info("Starting server on http://localhost:8081")
+        config = uvicorn.Config(
+            metrics_gpt_server.fastapi_app,
+            host="0.0.0.0",
+            port=8081,
+            loop="asyncio",
+        )
+        server = uvicorn.Server(config)
+        try:
+            await server.serve()
+        except KeyboardInterrupt:
+            logger.info("Shutting down server gracefully...")
+            metrics_gpt_server.shutdown_event.set()  # Signal shutdown
+            await server.shutdown()  # Gracefully shutdown uvicorn
+        except Exception as e:
+            logger.error(f"Server error: {e}")
+            raise
+        finally:
+            # Ensure cleanup happens
+            metrics_gpt_server.shutdown_event.set()
+            await asyncio.sleep(1)  # Give tasks time to clean up
+    else:
+        # Run in CLI chat mode
+        logger.info("Starting chat mode...")
+        refresh_task = asyncio.create_task(metrics_gpt_server.refresh_data())
+        chat_task = asyncio.create_task(metrics_gpt_server.chat())
 
-    metrics_gpt_server.chat()
+        try:
+            await chat_task
+        finally:
+            refresh_task.cancel()
+            try:
+                await refresh_task
+            except asyncio.CancelledError:
+                pass
 
 
 if __name__ == "__main__":
     init()  # Initialize colorama
-    main()
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\nShutdown requested... exiting gracefully")
+    except Exception as e:
+        print(f"Unexpected error: {e}")
+        raise
