@@ -1,15 +1,31 @@
-import setuptools
+from setuptools import setup, find_packages
 
-setuptools.setup(
+with open("README.md", "r", encoding="utf-8") as fh:
+    long_description = fh.read()
+with open("requirements.txt", "r", encoding="utf-8") as fh:
+    requirements = fh.read()
+
+
+setup(
     name="metricsGPT",
-    version="0.0.1",
+    version="0.1.0",
     author="saswatamcode",
-    py_modules=['metricsGPT'],
-    description="Talk to your metrics, with metricsGPT.",
+    description="Chat with Your Metrics using LLMs",
+    long_description=long_description,
+    long_description_content_type="text/markdown",
+    url="https://github.com/saswatamcode/metricsGPT",
+    packages=find_packages(),
+    py_modules=["metricsGPT"],
+    license="Apache License 2.0",
+    python_requires=">=3.12",
+    install_requires = [requirements],
     entry_points={
-        'console_scripts': [
-            'metricsGPT = metricsGPT:main',
+        "console_scripts": [
+            "metricsgpt=metricsGPT:runner",
         ],
     },
-    install_requires=["ollama", "chromadb", "prometheus-api-client"],
+    include_package_data=True,
+    package_data={
+        "metricsGPT": ["ui/build/**/*"],
+    },
 )

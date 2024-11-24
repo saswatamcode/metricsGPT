@@ -1,0 +1,14 @@
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.env
+*.db
+ui/node_modules/
+.git
+.gitignore
+series_cache.json
+data.db

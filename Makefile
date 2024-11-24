@@ -11,19 +11,29 @@ venv: # Create virtual environment
 	@echo ">> setting up environment"
 	$(PYTHON) -m venv $(VENV)
 
-.PHONY: setup
-setup: # Initial project setup
-setup: requirements.txt
+.PHONY: deps
+deps: # Initial project setup
+deps: requirements.txt
 	$(PIP) install -r requirements.txt
 
 .PHONY: build
 build: # Build project
-build: setup
+build: deps
 	$(PIP) install --editable .
+
+.PHONY: build-ui
+build-ui: # Build UI
+	@echo ">> building ui"
+	cd ui && npm i
+	npm run build
+
+.PHONY: docker-build
+docker-build: # Build docker image
+	docker build --load -t quay.io/saswatamcode/metricsgpt .
 
 .PHONY: fmt
 fmt: # Format all python files
-fmt: setup
+fmt: build
 	$(AUTOPEP8) --recursive --in-place --aggressive --aggressive $(PYTHON_FILES)
 
 .PHONY: run-prom
