@@ -32,6 +32,7 @@ refresh_interval: 900  # VectorDB Refresh interval in seconds
 server_host: "0.0.0.0"
 server_port: 8081
 
+# LLM Configuration
 llm:
   provider: "ollama"
   model: "llama3.1"
@@ -39,7 +40,7 @@ llm:
 embedding:
   provider: "ollama"  # or "openai"
   model: "nomic-embed-text"
-  dimension: 768
+  dimension: 768 # optional, defaults to this dimension
 
 # For Azure OpenAI embeddings:
 #embedding:
@@ -48,7 +49,8 @@ embedding:
 #  deployment_name: "your-embedding-deployment"
 #  api_key: "your-api-key"
 #  endpoint: "your-azure-endpoint"
-#  api_version: "2023-05-15"  # optional, defaults to this version
+#  api_version: "2023-05-15"  
+#  dimension: "dimensions of model"
 
 # For Watson embeddings:
 #embedding:
@@ -56,11 +58,14 @@ embedding:
 #  api_key: "your-api-key"
 #  project_id: "your-project-id"
 #  model_id: "google/flan-ul2"  # optional, defaults to this model
+#  dimension: "dimensions of model"
 
-# For Ollama embeddings:
+# For OpenAI embeddings:
 #embedding:
-#  provider: "ollama"
-#  model: "nomic-embed-text"
+#  provider: "openai"
+#  model: "text-embedding-ada-002"
+#  api_key: "your-api-key"
+#  dimension: "dimensions of model"
 
 # Example configurations for different providers:
 
