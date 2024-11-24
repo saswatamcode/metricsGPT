@@ -2,7 +2,11 @@
 
 Talk to your metrics.
 
-![Demo](./demo.png)
+<img src="./demo.png" alt="Demo" width="800" style="max-width: 100%;" />
+
+> [!NOTE]
+>
+> This is a work in progress with no API guarantees. The current implementation needs work on scalability.
 
 ## Installation
 

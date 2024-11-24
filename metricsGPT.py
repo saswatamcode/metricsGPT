@@ -36,8 +36,15 @@ from llama_index.embeddings.openai import OpenAIEmbedding
 from llama_index.embeddings.azure_openai import AzureOpenAIEmbedding
 from llama_index.embeddings.ibm import WatsonxEmbeddings
 
+# TODO(saswatamcode): Split all of these classes into separate modules with tests, and general code quality
+# TODO(saswatamcode): Metrics, token counting, response latencies etc
+# TODO(saswatamcode): Header/token forwarding for metric RBAC/Tenancy
+# TODO(saswatamcode): Some chat history audit log/analytics
+
+
 
 # TODO(@saswatamcode): Separate prompts based on the LLM?
+# TODO(saswatamcode): Better prompts?
 PROMPT_TEMPLATE_CHAT = """First, explain what the query does and how it helps answer the question. Think of yourself as a PromQL Expert SRE.
 Then, on a new line, provide just the PromQL query between <PROMQL> and </PROMQL> tags.
 
@@ -147,6 +154,7 @@ def create_logger(component_name: str):
     return logger
 
 
+# TODO(@saswatamcode): Make this cache only update new series and remove old ones via hashes.
 class MetricsCache:
     """MetricsCache is a manager for the prometheus metrics cache file.
     You can load it as a cache handler for PrometheusClient."""
@@ -184,7 +192,12 @@ class MetricsCache:
             cache.append(series)
             self.save(cache)
 
+# TODO(saswatamcode): Explore other endpoints like /federate or targets/metadata, so that we can also accept help text and unit.
+# A/C:
+# - Endpoint is actually uniform across most Prom APIs (Prometheus, Thanos, Cortex, AMP, GCM, Grafana)
+# - Endpoint can be called without huge load
 
+#TODO(saswatamcode): Explore if we can do these series calls concurrently or via workers (like goroutines)
 class PrometheusClient:
     """PrometheusClient is a wrapper around the Prometheus API client with some custom methods not available in upstream client."""
 
@@ -255,7 +268,9 @@ class PrometheusClient:
                 f"Error getting series", extra={"error": err}, exc_info=True
             )
 
-
+# TODO(saswatamcode): Explore if initial insertions can be sped up here, keeping in mind millions/billions metric scale
+# TODO(saswatamcode): Explore possiblity of only updating with new documents and removing old ones based on hashes, instead of dropping table on refresh
+# TODO(saswatamcode): Explore if we need some external Milvus?
 class VectorStoreManager:
     """VectorStoreManager is a manager for the vector store."""
 
@@ -339,7 +354,7 @@ def extract_promql(text):
 
     return matches
 
-
+# TODO(saswatamcode): Dynamic range queries
 class MetricsGPTServer:
     """MetricsGPTServer is the main server class for metricsGPT."""
 
@@ -373,6 +388,8 @@ class MetricsGPTServer:
             allow_methods=["*"],
             allow_headers=["*"],
         )
+        
+        # TODO(saswatamcode): Couldn't get the static files to show up when building with build module. Figure out why?
         if getattr(sys, "frozen", False):
             self.build_dir = os.path.join(sys._MEIPASS, "ui", "build")
         else:
@@ -406,13 +423,6 @@ class MetricsGPTServer:
         await self.vector_store_manager.initialize(cache)
 
     def setup_routes(self):
-        if getattr(sys, "frozen", False):
-            # For PyInstaller builds
-            self.build_dir = os.path.join(sys._MEIPASS, "ui", "build")
-        else:
-            # For regular package installation
-            self.build_dir = os.path.join(os.path.dirname(__file__), "ui", "build")
-
         if os.path.exists(self.build_dir):
             self.fastapi_app.mount(
                 "/static",
@@ -585,7 +595,7 @@ class MetricsGPTServer:
                     f"An error occurred", extra={"error": e}, exc_info=True
                 )
 
-
+# TODO(saswatamcode): Check if Llama-index doesn't already have these sorts of initializers.
 def get_llm_from_config(config: dict):
     """Initialize LLM based on configuration."""
     llm_config = config.get("llm", {})
