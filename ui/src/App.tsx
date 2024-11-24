@@ -1,4 +1,5 @@
-import React, { useState } from "react";
+import React, { useState, useRef, useEffect } from "react";
+import { PulseLoader } from "react-spinners";
 import "./App.css";
 
 interface ChatLogEntry {
@@ -15,6 +16,14 @@ const App: React.FC = () => {
   const [userMessage, setUserMessage] = useState<string>("");
   const [chatLog, setChatLog] = useState<ChatLogEntry[]>([]);
   const [isStreaming, setIsStreaming] = useState<boolean>(false);
+  const [isThinking, setIsThinking] = useState<boolean>(false);
+  const chatLogRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (chatLogRef.current) {
+      chatLogRef.current.scrollTop = chatLogRef.current.scrollHeight;
+    }
+  }, [chatLog]);
 
   const sendMessage = async () => {
     if (!userMessage.trim()) return;
@@ -26,6 +35,7 @@ const App: React.FC = () => {
     const currentMessage = userMessage;
     setUserMessage("");
     setIsStreaming(true);
+    setIsThinking(true);
 
     try {
       const response = await fetch("/chat", {
@@ -56,6 +66,7 @@ const App: React.FC = () => {
         const chunk = new TextDecoder().decode(value);
         try {
           const parsedData = JSON.parse(chunk);
+          setIsThinking(false);
           
           if (parsedData.type === "content") {
             botMessage += parsedData.data;
@@ -71,15 +82,15 @@ const App: React.FC = () => {
         }
       }
 
-      const cleanedMessage = botMessage.replace(/<\/?PROMQL>/g, '').trim();
       setChatLog(prevLog => [
         ...prevLog.slice(0, -1),
-        { sender: "bot", message: cleanedMessage, links: botLinks },
+        { sender: "bot", message: botMessage, links: botLinks },
       ]);
     } catch (error) {
       console.error("Error during chat:", error);
     } finally {
       setIsStreaming(false);
+      setIsThinking(false);
     }
   };
 
@@ -89,6 +100,22 @@ const App: React.FC = () => {
     }
   };
 
+  const renderMessage = (message: string) => {
+    const parts = message.split(/<PROMQL>|<\/PROMQL>/);
+    return parts.map((part, index) => {
+      // Even indices are regular text, odd indices are PromQL queries
+      if (index % 2 === 0) {
+        return <span key={index}>{part}</span>;
+      } else {
+        return (
+          <pre key={index} className="promql-block">
+            <code>{part}</code>
+          </pre>
+        );
+      }
+    });
+  };
+
   return (
     <div className="App">
       <header className="app-header">
@@ -96,7 +123,7 @@ const App: React.FC = () => {
         <p className="tagline">Talk to your metrics!</p>
       </header>
       <div className="chat-container">
-        <div className="chat-log">
+        <div className="chat-log" ref={chatLogRef}>
           {chatLog.map((entry, index) => (
             <div key={index} className={`chat-entry ${entry.sender}`}>
               <div className="message-container">
@@ -108,7 +135,12 @@ const App: React.FC = () => {
                     {entry.sender === "bot" ? "metricsGPT" : ""}
                   </div>
                   <div className="message-content">
-                    {entry.message}
+                    {renderMessage(entry.message)}
+                    {isThinking && index === chatLog.length - 1 && entry.sender === "bot" && (
+                      <div className="thinking">
+                        thinking... <PulseLoader size={8} color="#666" speedMultiplier={0.7} />
+                      </div>
+                    )}
                   </div>
                   {entry.links && entry.links.length > 0 && (
                     <div className="prometheus-links">
@@ -139,7 +171,13 @@ const App: React.FC = () => {
             disabled={isStreaming}
           />
           <button onClick={sendMessage} disabled={isStreaming}>
-            {isStreaming ? "Streaming..." : "Send"}
+            {isStreaming ? (
+              <>
+                Streaming... <PulseLoader size={8} color="#666" speedMultiplier={0.7} />
+              </>
+            ) : (
+              "Send"
+            )}
           </button>
         </div>
       </div>

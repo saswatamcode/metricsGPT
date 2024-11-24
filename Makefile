@@ -21,6 +21,10 @@ build: # Build project
 build: setup
 	$(PIP) install --editable .
 
+.PHONY: build-ui
+build-ui: # Build UI
+	cd ui && npm run build
+
 .PHONY: fmt
 fmt: # Format all python files
 fmt: setup

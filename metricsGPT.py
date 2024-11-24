@@ -279,6 +279,7 @@ class MetricsGPTServer:
         prometheus_url,
         prom_external_url,
         query_lookback_hours,
+        refresh_interval: int,
         logger: logging.Logger,
     ):
         self.vector_store_manager = vector_store_manager
@@ -301,15 +302,17 @@ class MetricsGPTServer:
         # Determine the base path for static files
         if getattr(sys, 'frozen', False):
             # Running in PyInstaller bundle
-            self.static_dir = os.path.join(sys._MEIPASS, "ui/build")
+            self.build_dir = os.path.join(sys._MEIPASS, "ui/build")
         else:
             # Running in normal Python environment
-            self.static_dir = os.path.join(os.path.dirname(__file__), "ui", "build")
+            self.build_dir = os.path.join(os.path.dirname(__file__), "ui", "build")
             
-        if os.path.exists(self.static_dir):
-            self.fastapi_app.mount("/static", StaticFiles(directory=os.path.join(self.static_dir, "static")), name="static")
+        if os.path.exists(self.build_dir):
+            self.fastapi_app.mount("/static", StaticFiles(directory=os.path.join(self.build_dir, "static")), name="static")
+            
         self.setup_routes()
         self.shutdown_event = asyncio.Event()
+        self.refresh_interval = refresh_interval
 
     @asynccontextmanager
     async def lifespan(self, app: FastAPI):
@@ -335,22 +338,24 @@ class MetricsGPTServer:
         await self.vector_store_manager.initialize(cache)
 
     def setup_routes(self):
-        # Add root route to serve index.html
         @self.fastapi_app.get("/")
         async def serve_spa():
-            return FileResponse(os.path.join(self.static_dir, "index.html"))
+            return FileResponse(os.path.join(self.build_dir, "index.html"))
             
         @self.fastapi_app.get("/{catch_all:path}")
         async def serve_spa_catch_all(catch_all: str):
-            return FileResponse(os.path.join(self.static_dir, "index.html"))
+            filepath = os.path.join(self.build_dir, catch_all)
+            if os.path.isfile(filepath):
+                return FileResponse(filepath)
+            else:
+                return FileResponse(os.path.join(self.build_dir, "index.html"))
 
-        # Existing chat endpoint
         self.fastapi_app.post("/chat")(self.chat_endpoint)
 
     async def refresh_data(self):
         while True:
             try:
-                await asyncio.sleep(30)
+                await asyncio.sleep(self.refresh_interval)
                 self.logger.info("Refreshing metrics cache and embeddings...")
                 await self.prometheus.get_all_series(self.metrics_cache)
                 updated_cache = self.metrics_cache.load()
@@ -364,13 +369,13 @@ class MetricsGPTServer:
     async def refresh_data_server(self):
         while not self.shutdown_event.is_set():
             try:
-                await asyncio.sleep(30)
+                await asyncio.sleep(self.refresh_interval)
                 self.logger.info("Refreshing metrics cache and embeddings...")
                 await self.prometheus.get_all_series(self.metrics_cache)
                 updated_cache = self.metrics_cache.load()
                 await self.vector_store_manager.refresh_embeddings(updated_cache)
             except Exception as e:
-                if not self.shutdown_event.is_set():  # Only log if not shutting down
+                if not self.shutdown_event.is_set():
                     self.logger.error(
                         "Error in refresh_data", extra={"error": str(e)}, exc_info=True
                     )
@@ -546,6 +551,12 @@ async def main():
         action="store_true",
         help="Run in server mode instead of CLI chat mode",
     )
+    parser.add_argument(
+        "--refresh-interval",
+        type=int,
+        default=300,
+        help="Interval in seconds between metric cache refreshes.",
+    )
 
     args = parser.parse_args()
     logger = create_logger("metrics_gpt_server")
@@ -573,6 +584,7 @@ async def main():
         args.prometheus_url,
         args.prom_external_url,
         args.query_lookback_hours,
+        args.refresh_interval,
         logger,
     )
     await metrics_gpt_server.initialize()
