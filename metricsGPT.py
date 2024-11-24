@@ -67,7 +67,7 @@ And finally here is the user's actual question: {prompt}
 """
 
 PROMPT_TEMPLATE_API = """First, explain what the query does and how it helps answer the question. Think of yourself as a PromQL Expert SRE.
-Then, on a new line, provide just the PromQL query between <PROMQL> and </PROMQL> tags.
+Then, on a new line, provide just the PromQL query between <PROMQL> and </PROMQL> tags without any markdown codeblock syntax.
 
 Ensure that,
 - The PromQL query is valid PromQL and will not cause errors and can actually run.
@@ -263,13 +263,15 @@ class VectorStoreManager:
             self,
             vectordb_path: str,
             embed_model,
-            logger: logging.Logger):
+            logger: logging.Logger,
+            dimension: int = 768):
         self.vectordb_path = vectordb_path
         self.embed_model = embed_model
         self.vector_store = None
         self.index = None
         self.lock = asyncio.Lock()
         self.logger = logger
+        self.dimension = dimension
 
     async def initialize(self, cache: list) -> None:
         """Initialize or load the vector store."""
@@ -283,7 +285,7 @@ class VectorStoreManager:
         self.logger.info("Creating new index")
         self.vector_store = MilvusVectorStore(
             uri=self.vectordb_path,
-            dim=768,
+            dim=self.dimension,
             overwrite=True,
             collection_name="metrics")
         storage_context = StorageContext.from_defaults(
@@ -303,7 +305,7 @@ class VectorStoreManager:
         self.logger.info("Loading existing index from disk")
         self.vector_store = MilvusVectorStore(
             uri=self.vectordb_path,
-            dim=768,
+            dim=self.dimension,
             overwrite=False,
             collection_name="metrics")
         async with self.lock:
@@ -316,12 +318,8 @@ class VectorStoreManager:
     def _create_documents(cache: list) -> list:
         documents = []
         for metric in cache:
-            metric_str = f"{
-                metric['__name__']}{
-                {{
-                    ', '.join(
-                        f'{k}={v}' for k,
-                        v in metric.items() if k != '__name__')}}}"
+            metric_labels = ', '.join(f'{k}={v}' for k, v in metric.items() if k != '__name__')
+            metric_str = f"{metric['__name__']}{{{metric_labels}}}"
             documents.append(
                 Document(
                     text=metric_str,
@@ -630,16 +628,16 @@ def get_embedding_model_from_config(config: dict):
     """Initialize embedding model based on configuration."""
     embed_config = config.get("embedding", {})
     provider = embed_config.get("provider", "ollama")
+    dimension = embed_config.get("dimension", 768)
 
     if provider == "ollama":
         return OllamaEmbedding(
-            model_name=embed_config.get(
-                "model", "nomic-embed-text"))
+            model_name=embed_config.get("model", "nomic-embed-text")), dimension
     elif provider == "openai":
         return OpenAIEmbedding(
             api_key=embed_config.get("api_key"),
             model=embed_config.get("model", "text-embedding-3-small"),
-        )
+        ), dimension
     elif provider == "azure":
         return AzureOpenAIEmbedding(
             model=embed_config.get("model"),
@@ -647,13 +645,13 @@ def get_embedding_model_from_config(config: dict):
             api_key=embed_config.get("api_key"),
             azure_endpoint=embed_config.get("endpoint"),
             api_version=embed_config.get("api_version", "2023-05-15"),
-        )
+        ), dimension
     elif provider == "watsonx":
         return WatsonxEmbeddings(
             api_key=embed_config.get("api_key"),
             project_id=embed_config.get("project_id"),
             model_id=embed_config.get("model_id", "google/flan-ul2"),
-        )
+        ), dimension
     else:
         raise ValueError(f"Unsupported embedding provider: {provider}")
 
@@ -699,7 +697,7 @@ async def main():
 
     # Initialize LLM and embedding model from config
     Settings.llm = get_llm_from_config(config)
-    Settings.embed_model = get_embedding_model_from_config(config)
+    Settings.embed_model, embed_dimension = get_embedding_model_from_config(config)
 
     prometheus = PrometheusClient(
         settings["prometheus_url"],
@@ -713,6 +711,7 @@ async def main():
         settings["vectordb_path"],
         Settings.embed_model,
         create_logger("vector_store_manager"),
+        dimension=embed_dimension
     )
 
     metrics_gpt_server = MetricsGPTServer(

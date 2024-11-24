@@ -23,10 +23,6 @@ prometheus_url: "http://localhost:9090"
 prom_external_url: null  # Optional external URL for links in the UI
 query_lookback_hours: 1.0
 
-# Model Configuration
-embedding_model: "nomic-embed-text"
-query_model: "metricsGPT"
-
 # Storage Configuration
 vectordb_path: "./data.db"
 series_cache_file: "./series_cache.json"
@@ -37,12 +33,13 @@ server_host: "0.0.0.0"
 server_port: 8081
 
 llm:
-  provider: "ollama"  # or "openai", "azure", "gemini", "watsonx", "vllm"
+  provider: "ollama"
   model: "llama3.1"
 
 embedding:
   provider: "ollama"  # or "openai"
   model: "nomic-embed-text"
+  dimension: 768
 
 # For Azure OpenAI embeddings:
 #embedding:
@@ -99,5 +96,3 @@ embedding:
 #  api_key: "your-api-key"
 #  project_id: "your-project-id"
 #  model_id: "your-model-id"
-
-

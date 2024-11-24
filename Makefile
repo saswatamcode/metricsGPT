@@ -18,7 +18,7 @@ deps: requirements.txt
 
 .PHONY: build
 build: # Build project
-build: setup
+build: deps
 	$(PIP) install --editable .
 
 .PHONY: build-ui
@@ -33,7 +33,7 @@ docker-build: # Build docker image
 
 .PHONY: fmt
 fmt: # Format all python files
-fmt: setup
+fmt: build
 	$(AUTOPEP8) --recursive --in-place --aggressive --aggressive $(PYTHON_FILES)
 
 .PHONY: run-prom
