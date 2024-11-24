@@ -55,7 +55,7 @@ Your explanation of what the query does and how it helps...
 
 
 Here is some more information below,
-        
+
 Assume that the following is a list of metrics that are available to query within the TSDB (but there can be more). Take this into context when designing the query:
 {data}
 
@@ -82,12 +82,13 @@ Your explanation of what the query does and how it helps...
 <PROMQL>your_query_here</PROMQL>
 
 Here is some more information below,
-        
+
 Assume that the following is a list of metrics that are available to query within the TSDB (but there can be more). Take this into context when designing the query:
 {data}
 
 And finally here is the user's actual question: {prompt}
 """
+
 
 class LogfmtFormatter(logging.Formatter):
     """
@@ -187,12 +188,16 @@ class MetricsCache:
 class PrometheusClient:
     """PrometheusClient is a wrapper around the Prometheus API client with some custom methods not available in upstream client."""
 
-    def __init__(self, url: str, logger: logging.Logger, auth_config: dict = None):
+    def __init__(
+            self,
+            url: str,
+            logger: logging.Logger,
+            auth_config: dict = None):
         client_kwargs = {
             'url': url,
             'disable_ssl': True
         }
-        
+
         # Add authentication configuration if provided
         if auth_config:
             if auth_config.get('basic_auth'):
@@ -233,8 +238,9 @@ class PrometheusClient:
         if response.status_code == 200:
             return response.json()["data"]
         raise prometheus_api_client.PrometheusApiClientException(
-            f"/api/v1/series PrometheusApiClientException: HTTP Status Code {response.status_code} ({response.content})"
-        )
+            f"/api/v1/series PrometheusApiClientException: HTTP Status Code {
+                response.status_code} ({
+                response.content})")
 
     async def get_all_series(self, cache_handler: MetricsCache) -> None:
         """Fetches all metrics and their series from Prometheus."""
@@ -253,7 +259,11 @@ class PrometheusClient:
 class VectorStoreManager:
     """VectorStoreManager is a manager for the vector store."""
 
-    def __init__(self, vectordb_path: str, embed_model, logger: logging.Logger):
+    def __init__(
+            self,
+            vectordb_path: str,
+            embed_model,
+            logger: logging.Logger):
         self.vectordb_path = vectordb_path
         self.embed_model = embed_model
         self.vector_store = None
@@ -272,14 +282,16 @@ class VectorStoreManager:
     async def _create_new_index(self, cache: list) -> None:
         self.logger.info("Creating new index")
         self.vector_store = MilvusVectorStore(
-            uri=self.vectordb_path, dim=768, overwrite=True, collection_name="metrics"
-        )
-        storage_context = StorageContext.from_defaults(vector_store=self.vector_store)
+            uri=self.vectordb_path,
+            dim=768,
+            overwrite=True,
+            collection_name="metrics")
+        storage_context = StorageContext.from_defaults(
+            vector_store=self.vector_store)
         documents = self._create_documents(cache)
         async with self.lock:
             self.index = VectorStoreIndex.from_documents(
-                documents, storage_context=storage_context, embed_model=self.embed_model
-            )
+                documents, storage_context=storage_context, embed_model=self.embed_model)
             self.logger.info("New index created successfully")
 
     async def refresh_embeddings(self, cache: list) -> None:
@@ -290,8 +302,10 @@ class VectorStoreManager:
     async def _load_existing_index(self) -> None:
         self.logger.info("Loading existing index from disk")
         self.vector_store = MilvusVectorStore(
-            uri=self.vectordb_path, dim=768, overwrite=False, collection_name="metrics"
-        )
+            uri=self.vectordb_path,
+            dim=768,
+            overwrite=False,
+            collection_name="metrics")
         async with self.lock:
             self.index = VectorStoreIndex.from_vector_store(
                 vector_store=self.vector_store, embed_model=self.embed_model
@@ -302,13 +316,22 @@ class VectorStoreManager:
     def _create_documents(cache: list) -> list:
         documents = []
         for metric in cache:
-            metric_str = f"{metric['__name__']}{{{', '.join(f'{k}={v}' for k, v in metric.items() if k != '__name__')}}}"
-            documents.append(Document(text=metric_str, doc_id=hash_metric(metric)))
+            metric_str = f"{
+                metric['__name__']}{
+                {{
+                    ', '.join(
+                        f'{k}={v}' for k,
+                        v in metric.items() if k != '__name__')}}}"
+            documents.append(
+                Document(
+                    text=metric_str,
+                    doc_id=hash_metric(metric)))
         return documents
 
 
 def hash_metric(d: dict) -> str:
-    return hashlib.sha256(str(json.dumps(d, sort_keys=True)).encode()).hexdigest()
+    return hashlib.sha256(
+        str(json.dumps(d, sort_keys=True)).encode()).hexdigest()
 
 
 def extract_promql(text):
@@ -355,7 +378,8 @@ class MetricsGPTServer:
         if getattr(sys, "frozen", False):
             self.build_dir = os.path.join(sys._MEIPASS, "ui/build")
         else:
-            self.build_dir = os.path.join(os.path.dirname(__file__), "ui", "build")
+            self.build_dir = os.path.join(
+                os.path.dirname(__file__), "ui", "build")
 
         self.setup_routes()
         self.shutdown_event = asyncio.Event()
@@ -377,7 +401,8 @@ class MetricsGPTServer:
     async def initialize(self):
         cache = self.metrics_cache.load()
         if len(cache) == 0:
-            self.logger.info("No cache found, fetching all series from Prometheus...")
+            self.logger.info(
+                "No cache found, fetching all series from Prometheus...")
             await self.prometheus.get_all_series(self.metrics_cache)
             cache = self.metrics_cache.load()
         await self.vector_store_manager.initialize(cache)
@@ -389,7 +414,7 @@ class MetricsGPTServer:
                 StaticFiles(directory=os.path.join(self.build_dir, "static")),
                 name="static",
             )
-        
+
         @self.fastapi_app.get("/")
         async def serve_spa():
             return FileResponse(os.path.join(self.build_dir, "index.html"))
@@ -414,9 +439,10 @@ class MetricsGPTServer:
                 await self.vector_store_manager.refresh_embeddings(updated_cache)
             except Exception as e:
                 self.logger.error(
-                    "Error in refresh_data", extra={"error": str(e)}, exc_info=True
-                )
-                await asyncio.sleep(5)  # Wait a bit before retrying if there's an error
+                    "Error in refresh_data", extra={
+                        "error": str(e)}, exc_info=True)
+                # Wait a bit before retrying if there's an error
+                await asyncio.sleep(5)
 
     async def refresh_data_server(self):
         while not self.shutdown_event.is_set():
@@ -429,8 +455,8 @@ class MetricsGPTServer:
             except Exception as e:
                 if not self.shutdown_event.is_set():
                     self.logger.error(
-                        "Error in refresh_data", extra={"error": str(e)}, exc_info=True
-                    )
+                        "Error in refresh_data", extra={
+                            "error": str(e)}, exc_info=True)
                     await asyncio.sleep(5)
 
     async def chat_endpoint(self, request: Request):
@@ -473,14 +499,17 @@ class MetricsGPTServer:
                     prometheus_links = []
                     for query in queries:
                         base_url = self.prom_external_url or self.prometheus_url
-                        url = f"{base_url}/graph?g0.expr={urllib.parse.quote(query)}&g0.range_input={self.query_lookback_hours}h&g0.tab=0"
+                        url = f"{base_url}/graph?g0.expr={
+                            urllib.parse.quote(query)}&g0.range_input={
+                            self.query_lookback_hours}h&g0.tab=0"
                         prometheus_links.append(url)
 
                     yield json.dumps(
                         {"type": "prometheus_links", "data": prometheus_links}
                     ) + "\n"
 
-            return StreamingResponse(generate(), media_type="application/x-ndjson")
+            return StreamingResponse(
+                generate(), media_type="application/x-ndjson")
 
         except Exception as e:
             self.logger.error(
@@ -537,7 +566,9 @@ class MetricsGPTServer:
                     await aioconsole.aprint("\nView these queries in Prometheus:")
                     for i, query in enumerate(queries, 1):
                         base_url = self.prom_external_url or self.prometheus_url
-                        url = f"{base_url}/graph?g0.expr={urllib.parse.quote(query)}&g0.range_input={self.query_lookback_hours}h&g0.tab=0"
+                        url = f"{base_url}/graph?g0.expr={
+                            urllib.parse.quote(query)}&g0.range_input={
+                            self.query_lookback_hours}h&g0.tab=0"
                         await aioconsole.aprint(f"{i}. {url}")
 
                 # Store message history
@@ -594,7 +625,9 @@ def get_embedding_model_from_config(config: dict):
     provider = embed_config.get("provider", "ollama")
 
     if provider == "ollama":
-        return OllamaEmbedding(model_name=embed_config.get("model", "nomic-embed-text"))
+        return OllamaEmbedding(
+            model_name=embed_config.get(
+                "model", "nomic-embed-text"))
     elif provider == "openai":
         return OpenAIEmbedding(
             api_key=embed_config.get("api_key"),
@@ -619,7 +652,8 @@ def get_embedding_model_from_config(config: dict):
 
 
 async def main():
-    parser = argparse.ArgumentParser(description="metricsGPT - Chat with Your Metrics!")
+    parser = argparse.ArgumentParser(
+        description="metricsGPT - Chat with Your Metrics!")
     parser.add_argument(
         "--config",
         default="config.yaml",
@@ -638,7 +672,9 @@ async def main():
         with open(args.config, "r") as f:
             config = yaml.safe_load(f) or {}
     except FileNotFoundError:
-        logger.warning(f"Configuration file {args.config} not found. Using defaults.")
+        logger.warning(
+            f"Configuration file {
+                args.config} not found. Using defaults.")
         config = {}
 
     # Set defaults and override with YAML values
@@ -724,7 +760,7 @@ async def main():
                 pass
 
 
-if __name__ == "__main__":
+def runner():
     init()  # Initialize colorama
     try:
         asyncio.run(main())
@@ -733,3 +769,7 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"Unexpected error: {e}")
         raise
+
+
+if __name__ == "__main__":
+    runner()

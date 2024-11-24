@@ -21,6 +21,11 @@ build: # Build project
 build: setup
 	$(PIP) install --editable .
 
+.PHONY: build-dist
+build-dist: # Build project
+build-dist: setup
+	$(PYTHON) -m build .
+
 .PHONY: build-ui
 build-ui: # Build UI
 	cd ui && npm run build
