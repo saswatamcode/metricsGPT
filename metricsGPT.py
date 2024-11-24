@@ -1,38 +1,44 @@
-import prometheus_api_client
 import argparse
 import re
 import urllib.parse
-from colorama import Fore, init
+import sys
+import yaml
 import os
 import json
 import hashlib
-from llama_index.core import (
-    Document,
-    VectorStoreIndex,
-    StorageContext,
-)
-from llama_index.core.vector_stores.types import VectorStoreQuery
-from llama_index.vector_stores.milvus import MilvusVectorStore
-from llama_index.core.llms import ChatMessage
-from llama_index.llms.ollama import Ollama
-from llama_index.embeddings.ollama import OllamaEmbedding
-from llama_index.core import Settings
 import logging
 import traceback
 import uvicorn
 import asyncio
 import aioconsole
+
+from colorama import Fore, init
+import prometheus_api_client
+
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
 from contextlib import asynccontextmanager
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-import sys
-import yaml
+
+from llama_index.core import Document, VectorStoreIndex, StorageContext, Settings
+from llama_index.core.vector_stores.types import VectorStoreQuery
+from llama_index.vector_stores.milvus import MilvusVectorStore
+from llama_index.core.llms import ChatMessage
+from llama_index.llms.ollama import Ollama
+from llama_index.llms.openai import OpenAI
+from llama_index.llms.azure_openai import AzureOpenAI
+from llama_index.llms.gemini import Gemini
+from llama_index.llms.ibm.base import WatsonxLLM
+from llama_index.embeddings.ollama import OllamaEmbedding
+from llama_index.embeddings.openai import OpenAIEmbedding
+from llama_index.embeddings.azure_openai import AzureOpenAIEmbedding
+from llama_index.embeddings.ibm import WatsonxEmbeddings
 
 
-PROMPT_TEMPLATE = """First, explain what the query does and how it helps answer the question. Think of yourself as a PromQL Expert SRE.
+# TODO(@saswatamcode): Separate prompts based on the LLM?
+PROMPT_TEMPLATE_CHAT = """First, explain what the query does and how it helps answer the question. Think of yourself as a PromQL Expert SRE.
 Then, on a new line, provide just the PromQL query between <PROMQL> and </PROMQL> tags.
 
 Ensure that,
@@ -60,6 +66,28 @@ edit your response accordinly, but do not go beyond the format:
 And finally here is the user's actual question: {prompt}
 """
 
+PROMPT_TEMPLATE_API = """First, explain what the query does and how it helps answer the question. Think of yourself as a PromQL Expert SRE.
+Then, on a new line, provide just the PromQL query between <PROMQL> and </PROMQL> tags.
+
+Ensure that,
+- The PromQL query is valid PromQL and will not cause errors and can actually run.
+- The PromQL query is URL encodable.
+- The PromQL query takes into account the upstream and open source best practices and norms for Prometheus.
+- The PromQL query make reasonable assumptions from the query and the metrics provided as well as their nomenclature.
+- Ensure that your final PromQL query has balanced brackets and balanced double quotes(when dealing with label selectors)
+
+Format your response like this:
+Your explanation of what the query does and how it helps...
+
+<PROMQL>your_query_here</PROMQL>
+
+Here is some more information below,
+        
+Assume that the following is a list of metrics that are available to query within the TSDB (but there can be more). Take this into context when designing the query:
+{data}
+
+And finally here is the user's actual question: {prompt}
+"""
 
 class LogfmtFormatter(logging.Formatter):
     """
@@ -77,7 +105,6 @@ class LogfmtFormatter(logging.Formatter):
         super().__init__(*args, **kwargs)
 
     def format(self, record):
-        # Start with basic log information
         log_data = {
             "level": record.levelname,
             "time": self.formatTime(record, self.datefmt),
@@ -85,16 +112,13 @@ class LogfmtFormatter(logging.Formatter):
             "message": record.getMessage(),
         }
 
-        # Include any extra fields
         if hasattr(record, "extra"):
             log_data.update(record.extra)
 
-        # Include stack trace if an exception is present
         if record.exc_info:
             stack_trace = traceback.format_exception(*record.exc_info)
             log_data["stack_trace"] = "".join(stack_trace).strip()
 
-        # Build logfmt key-value string
         return " ".join(
             f"{key}={json.dumps(value)}"
             for key, value in log_data.items()
@@ -163,8 +187,36 @@ class MetricsCache:
 class PrometheusClient:
     """PrometheusClient is a wrapper around the Prometheus API client with some custom methods not available in upstream client."""
 
-    def __init__(self, url: str, logger: logging.Logger):
-        self.client = prometheus_api_client.PrometheusConnect(url=url, disable_ssl=True)
+    def __init__(self, url: str, logger: logging.Logger, auth_config: dict = None):
+        client_kwargs = {
+            'url': url,
+            'disable_ssl': True
+        }
+        
+        # Add authentication configuration if provided
+        if auth_config:
+            if auth_config.get('basic_auth'):
+                client_kwargs['auth'] = (
+                    auth_config['basic_auth'].get('username'),
+                    auth_config['basic_auth'].get('password')
+                )
+            if auth_config.get('bearer_token'):
+                client_kwargs['headers'] = {
+                    'Authorization': f"Bearer {auth_config['bearer_token']}"
+                }
+            if auth_config.get('custom_headers'):
+                client_kwargs['headers'] = auth_config['custom_headers']
+            if auth_config.get('tls'):
+                client_kwargs.update({
+                    'disable_ssl': False,
+                    'verify': not auth_config['tls'].get('skip_verify', False),
+                    'cert': (
+                        auth_config['tls'].get('cert_file'),
+                        auth_config['tls'].get('key_file')
+                    ) if auth_config['tls'].get('cert_file') else None
+                })
+
+        self.client = prometheus_api_client.PrometheusConnect(**client_kwargs)
         self.logger = logger
 
     async def get_series(self, params: dict = None) -> list:
@@ -300,29 +352,21 @@ class MetricsGPTServer:
             allow_methods=["*"],
             allow_headers=["*"],
         )
-        # Determine the base path for static files
-        if getattr(sys, 'frozen', False):
-            # Running in PyInstaller bundle
+        if getattr(sys, "frozen", False):
             self.build_dir = os.path.join(sys._MEIPASS, "ui/build")
         else:
-            # Running in normal Python environment
             self.build_dir = os.path.join(os.path.dirname(__file__), "ui", "build")
-            
-        if os.path.exists(self.build_dir):
-            self.fastapi_app.mount("/static", StaticFiles(directory=os.path.join(self.build_dir, "static")), name="static")
-            
+
         self.setup_routes()
         self.shutdown_event = asyncio.Event()
         self.refresh_interval = refresh_interval
 
     @asynccontextmanager
     async def lifespan(self, app: FastAPI):
-        # Start the refresh task
         refresh_task = asyncio.create_task(self.refresh_data_server())
         try:
             yield
         finally:
-            # Cleanup: Cancel the refresh task when shutting down
             self.shutdown_event.set()
             refresh_task.cancel()
             try:
@@ -339,10 +383,17 @@ class MetricsGPTServer:
         await self.vector_store_manager.initialize(cache)
 
     def setup_routes(self):
+        if os.path.exists(self.build_dir):
+            self.fastapi_app.mount(
+                "/static",
+                StaticFiles(directory=os.path.join(self.build_dir, "static")),
+                name="static",
+            )
+        
         @self.fastapi_app.get("/")
         async def serve_spa():
             return FileResponse(os.path.join(self.build_dir, "index.html"))
-            
+
         @self.fastapi_app.get("/{catch_all:path}")
         async def serve_spa_catch_all(catch_all: str):
             filepath = os.path.join(self.build_dir, catch_all)
@@ -404,21 +455,19 @@ class MetricsGPTServer:
                 chat_messages = [
                     ChatMessage(
                         role="user",
-                        content=PROMPT_TEMPLATE.format(
+                        # TODO(@saswatamcode): Add chat history
+                        content=PROMPT_TEMPLATE_API.format(
                             data=data,
-                            chat_history="",  # For now, not maintaining chat history in API mode
                             prompt=prompt,
                         ),
                     )
                 ]
 
-                # Stream the main response
                 full_response = ""
                 for chunk in self.llm.stream_chat(messages=chat_messages):
                     full_response += chunk.delta
                     yield json.dumps({"type": "content", "data": chunk.delta}) + "\n"
 
-                # Extract and send Prometheus links
                 queries = extract_promql(full_response)
                 if queries:
                     prometheus_links = []
@@ -470,7 +519,7 @@ class MetricsGPTServer:
                 chat_messages.append(
                     ChatMessage(
                         role="user",
-                        content=PROMPT_TEMPLATE.format(
+                        content=PROMPT_TEMPLATE_CHAT.format(
                             data=data, chat_history=chat_history, prompt=prompt
                         ),
                     )
@@ -501,6 +550,74 @@ class MetricsGPTServer:
                 )
 
 
+def get_llm_from_config(config: dict):
+    """Initialize LLM based on configuration."""
+    llm_config = config.get("llm", {})
+    provider = llm_config.get("provider", "ollama")
+
+    if provider == "ollama":
+        return Ollama(
+            model=llm_config.get("model", "metricsGPT"),
+            request_timeout=llm_config.get("timeout", 120.0),
+        )
+    elif provider == "openai":
+        return OpenAI(
+            model=llm_config.get("model", "gpt-4"),
+            api_key=llm_config.get("api_key"),
+            temperature=llm_config.get("temperature", 0.7),
+        )
+    elif provider == "azure":
+        return AzureOpenAI(
+            model=llm_config.get("model"),
+            deployment_name=llm_config.get("deployment_name"),
+            api_key=llm_config.get("api_key"),
+            azure_endpoint=llm_config.get("endpoint"),
+        )
+    elif provider == "gemini":
+        return Gemini(
+            api_key=llm_config.get("api_key"),
+            model=llm_config.get("model", "gemini-pro"),
+        )
+    elif provider == "watsonx":
+        return WatsonxLLM(
+            api_key=llm_config.get("api_key"),
+            project_id=llm_config.get("project_id"),
+            model_id=llm_config.get("model_id"),
+        )
+    else:
+        raise ValueError(f"Unsupported LLM provider: {provider}")
+
+
+def get_embedding_model_from_config(config: dict):
+    """Initialize embedding model based on configuration."""
+    embed_config = config.get("embedding", {})
+    provider = embed_config.get("provider", "ollama")
+
+    if provider == "ollama":
+        return OllamaEmbedding(model_name=embed_config.get("model", "nomic-embed-text"))
+    elif provider == "openai":
+        return OpenAIEmbedding(
+            api_key=embed_config.get("api_key"),
+            model=embed_config.get("model", "text-embedding-3-small"),
+        )
+    elif provider == "azure":
+        return AzureOpenAIEmbedding(
+            model=embed_config.get("model"),
+            deployment_name=embed_config.get("deployment_name"),
+            api_key=embed_config.get("api_key"),
+            azure_endpoint=embed_config.get("endpoint"),
+            api_version=embed_config.get("api_version", "2023-05-15"),
+        )
+    elif provider == "watsonx":
+        return WatsonxEmbeddings(
+            api_key=embed_config.get("api_key"),
+            project_id=embed_config.get("project_id"),
+            model_id=embed_config.get("model_id", "google/flan-ul2"),
+        )
+    else:
+        raise ValueError(f"Unsupported embedding provider: {provider}")
+
+
 async def main():
     parser = argparse.ArgumentParser(description="metricsGPT - Chat with Your Metrics!")
     parser.add_argument(
@@ -518,7 +635,7 @@ async def main():
 
     # Load YAML configuration
     try:
-        with open(args.config, 'r') as f:
+        with open(args.config, "r") as f:
             config = yaml.safe_load(f) or {}
     except FileNotFoundError:
         logger.warning(f"Configuration file {args.config} not found. Using defaults.")
@@ -528,37 +645,39 @@ async def main():
     settings = {
         "prometheus_url": config.get("prometheus_url", "http://localhost:9090"),
         "prom_external_url": config.get("prom_external_url", None),
-        "embedding_model": config.get("embedding_model", "nomic-embed-text"),
-        "query_model": config.get("query_model", "metricsGPT"),
+        "prometheus_auth": config.get("prometheus_auth", None),
         "vectordb_path": config.get("vectordb_path", "./data.db"),
         "query_lookback_hours": float(config.get("query_lookback_hours", 1.0)),
-        "query_step": config.get("query_step", "14s"),
         "series_cache_file": config.get("series_cache_file", "./series_cache.json"),
         "refresh_interval": int(config.get("refresh_interval", 300)),
         "server_host": config.get("server_host", "0.0.0.0"),
-        "server_port": int(config.get("server_port", 8081))
+        "server_port": int(config.get("server_port", 8081)),
     }
- 
-    Settings.llm = Ollama(model=settings["query_model"], request_timeout=120.0)
-    Settings.embed_model = OllamaEmbedding(
-        model_name=settings["embedding_model"],
-    )
 
-    prometheus = PrometheusClient(settings["prometheus_url"], create_logger("prometheus"))
-    metrics_cache = MetricsCache(settings["series_cache_file"], create_logger("metrics_cache"))
+    # Initialize LLM and embedding model from config
+    Settings.llm = get_llm_from_config(config)
+    Settings.embed_model = get_embedding_model_from_config(config)
+
+    prometheus = PrometheusClient(
+        settings["prometheus_url"],
+        create_logger("prometheus"),
+        settings["prometheus_auth"]
+    )
+    metrics_cache = MetricsCache(
+        settings["series_cache_file"], create_logger("metrics_cache")
+    )
     vector_store_manager = VectorStoreManager(
-        settings["vectordb_path"], Settings.embed_model, create_logger("vector_store_manager")
+        settings["vectordb_path"],
+        Settings.embed_model,
+        create_logger("vector_store_manager"),
     )
-
-    llm = Ollama(model=settings["query_model"], request_timeout=120.0)
-    embed_model = OllamaEmbedding(model_name=settings["embedding_model"])
 
     metrics_gpt_server = MetricsGPTServer(
         vector_store_manager,
         prometheus,
         metrics_cache,
-        llm,
-        embed_model,
+        Settings.llm,
+        Settings.embed_model,
         settings["prometheus_url"],
         settings["prom_external_url"],
         settings["query_lookback_hours"],
@@ -568,8 +687,9 @@ async def main():
     await metrics_gpt_server.initialize()
 
     if args.server:
-        # Run in server mode
-        logger.info(f"Starting server on http://{settings['server_host']}:{settings['server_port']}")
+        logger.info(
+            f"Starting server on http://{settings['server_host']}:{settings['server_port']}"
+        )
         config = uvicorn.Config(
             metrics_gpt_server.fastapi_app,
             host=settings["server_host"],
@@ -587,11 +707,9 @@ async def main():
             logger.error(f"Server error: {e}")
             raise
         finally:
-            # Ensure cleanup happens
             metrics_gpt_server.shutdown_event.set()
             await asyncio.sleep(1)  # Give tasks time to clean up
     else:
-        # Run in CLI chat mode
         logger.info("Starting chat mode...")
         refresh_task = asyncio.create_task(metrics_gpt_server.refresh_data())
         chat_task = asyncio.create_task(metrics_gpt_server.chat())

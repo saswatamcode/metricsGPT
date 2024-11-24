@@ -18,12 +18,19 @@ const App: React.FC = () => {
   const [isStreaming, setIsStreaming] = useState<boolean>(false);
   const [isThinking, setIsThinking] = useState<boolean>(false);
   const chatLogRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (chatLogRef.current) {
       chatLogRef.current.scrollTop = chatLogRef.current.scrollHeight;
     }
   }, [chatLog]);
+
+  useEffect(() => {
+    if (!isStreaming && inputRef.current) {
+      inputRef.current.focus();
+    }
+  }, [isStreaming]);
 
   const sendMessage = async () => {
     if (!userMessage.trim()) return;
@@ -70,10 +77,12 @@ const App: React.FC = () => {
           
           if (parsedData.type === "content") {
             botMessage += parsedData.data;
-            setChatLog(prevLog => [
-              ...prevLog.slice(0, -1),
-              { sender: "bot", message: botMessage, links: botLinks },
-            ]);
+            const updatedEntry: ChatLogEntry = {
+              sender: "bot",
+              message: botMessage,
+              links: botLinks
+            };
+            setChatLog(prevLog => [...prevLog.slice(0, -1), updatedEntry]);
           } else if (parsedData.type === "prometheus_links") {
             botLinks = parsedData.data.map((url: string) => ({ url }));
           }
@@ -82,10 +91,12 @@ const App: React.FC = () => {
         }
       }
 
-      setChatLog(prevLog => [
-        ...prevLog.slice(0, -1),
-        { sender: "bot", message: botMessage, links: botLinks },
-      ]);
+      const finalEntry: ChatLogEntry = {
+        sender: "bot",
+        message: botMessage,
+        links: botLinks
+      };
+      setChatLog(prevLog => [...prevLog.slice(0, -1), finalEntry]);
     } catch (error) {
       console.error("Error during chat:", error);
     } finally {
@@ -163,6 +174,7 @@ const App: React.FC = () => {
         </div>
         <div className="chat-input">
           <input
+            ref={inputRef}
             type="text"
             value={userMessage}
             onChange={(e) => setUserMessage(e.target.value)}
