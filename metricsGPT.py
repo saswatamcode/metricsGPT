@@ -29,6 +29,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 import sys
+import yaml
 
 
 PROMPT_TEMPLATE = """First, explain what the query does and how it helps answer the question. Think of yourself as a PromQL Expert SRE.
@@ -501,79 +502,56 @@ class MetricsGPTServer:
 
 
 async def main():
-    # Set up argument parser
     parser = argparse.ArgumentParser(description="metricsGPT - Chat with Your Metrics!")
     parser.add_argument(
-        "--prometheus-url",
-        default="http://localhost:9090",
-        help="URL of the Prometheus-API compatible server to query.",
-    )
-    parser.add_argument(
-        "--prom-external-url",
-        help="External URL of the Prometheus-compatible instance, to provide URL links.",
-    )
-    parser.add_argument(
-        "--embedding-model",
-        default="nomic-embed-text",
-        help="Model to use for RAG embeddings for your metrics.",
-    )
-    parser.add_argument(
-        "--query-model",
-        default="metricsGPT",
-        help="Model to use for processing your prompts.",
-    )
-    parser.add_argument(
-        "--vectordb-path",
-        default="./data.db",
-        help="Path to persist Milvus storage to.",
-    )
-    parser.add_argument(
-        "--modelfile-path",
-        default="./Modelfile",
-        help="Path to Ollama Modelfile for metricsGPT model.",
-    )
-    parser.add_argument(
-        "--query-lookback-hours",
-        type=float,
-        default=1.0,
-        help="Hours to lookback when executing PromQL queries.",
-    )
-    parser.add_argument(
-        "--query-step", default="14s", help="PromQL range query step parameter."
-    )
-    parser.add_argument(
-        "--series-cache-file",
-        default="./series_cache.json",
-        help="Path to the series cache file.",
+        "--config",
+        default="config.yaml",
+        help="Path to YAML configuration file",
     )
     parser.add_argument(
         "--server",
         action="store_true",
         help="Run in server mode instead of CLI chat mode",
     )
-    parser.add_argument(
-        "--refresh-interval",
-        type=int,
-        default=300,
-        help="Interval in seconds between metric cache refreshes.",
-    )
-
     args = parser.parse_args()
     logger = create_logger("metrics_gpt_server")
 
-    Settings.llm = Ollama(model=args.query_model, request_timeout=120.0)
+    # Load YAML configuration
+    try:
+        with open(args.config, 'r') as f:
+            config = yaml.safe_load(f) or {}
+    except FileNotFoundError:
+        logger.warning(f"Configuration file {args.config} not found. Using defaults.")
+        config = {}
+
+    # Set defaults and override with YAML values
+    settings = {
+        "prometheus_url": config.get("prometheus_url", "http://localhost:9090"),
+        "prom_external_url": config.get("prom_external_url", None),
+        "embedding_model": config.get("embedding_model", "nomic-embed-text"),
+        "query_model": config.get("query_model", "metricsGPT"),
+        "vectordb_path": config.get("vectordb_path", "./data.db"),
+        "query_lookback_hours": float(config.get("query_lookback_hours", 1.0)),
+        "query_step": config.get("query_step", "14s"),
+        "series_cache_file": config.get("series_cache_file", "./series_cache.json"),
+        "refresh_interval": int(config.get("refresh_interval", 300)),
+        "server_host": config.get("server_host", "0.0.0.0"),
+        "server_port": int(config.get("server_port", 8081))
+    }
+ 
+    Settings.llm = Ollama(model=settings["query_model"], request_timeout=120.0)
     Settings.embed_model = OllamaEmbedding(
-        model_name=args.embedding_model,
+        model_name=settings["embedding_model"],
     )
 
-    prometheus = PrometheusClient(args.prometheus_url, create_logger("prometheus"))
-    metrics_cache = MetricsCache(args.series_cache_file, create_logger("metrics_cache"))
+    prometheus = PrometheusClient(settings["prometheus_url"], create_logger("prometheus"))
+    metrics_cache = MetricsCache(settings["series_cache_file"], create_logger("metrics_cache"))
     vector_store_manager = VectorStoreManager(
-        args.vectordb_path, Settings.embed_model, create_logger("vector_store_manager")
+        settings["vectordb_path"], Settings.embed_model, create_logger("vector_store_manager")
     )
 
-    llm = Ollama(model=args.query_model, request_timeout=120.0)
-    embed_model = OllamaEmbedding(model_name=args.embedding_model)
+    llm = Ollama(model=settings["query_model"], request_timeout=120.0)
+    embed_model = OllamaEmbedding(model_name=settings["embedding_model"])
 
     metrics_gpt_server = MetricsGPTServer(
         vector_store_manager,
@@ -581,21 +559,21 @@ async def main():
         metrics_cache,
         llm,
         embed_model,
-        args.prometheus_url,
-        args.prom_external_url,
-        args.query_lookback_hours,
-        args.refresh_interval,
+        settings["prometheus_url"],
+        settings["prom_external_url"],
+        settings["query_lookback_hours"],
+        settings["refresh_interval"],
         logger,
     )
     await metrics_gpt_server.initialize()
 
     if args.server:
         # Run in server mode
-        logger.info("Starting server on http://localhost:8081")
+        logger.info(f"Starting server on http://{settings['server_host']}:{settings['server_port']}")
         config = uvicorn.Config(
             metrics_gpt_server.fastapi_app,
-            host="0.0.0.0",
-            port=8081,
+            host=settings["server_host"],
+            port=settings["server_port"],
             loop="asyncio",
         )
         server = uvicorn.Server(config)
@@ -603,8 +581,8 @@ async def main():
             await server.serve()
         except KeyboardInterrupt:
             logger.info("Shutting down server gracefully...")
-            metrics_gpt_server.shutdown_event.set()  # Signal shutdown
-            await server.shutdown()  # Gracefully shutdown uvicorn
+            metrics_gpt_server.shutdown_event.set()
+            await server.shutdown()
         except Exception as e:
             logger.error(f"Server error: {e}")
             raise

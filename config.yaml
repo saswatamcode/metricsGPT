@@ -1,0 +1,16 @@
+# Prometheus Configuration
+prometheus_url: "http://localhost:9090"
+prom_external_url: null  # Optional external URL
+query_lookback_hours: 1.0
+query_step: "14s"
+
+# Model Configuration
+embedding_model: "nomic-embed-text"
+query_model: "metricsGPT"
+
+# Storage Configuration
+vectordb_path: "./data.db"
+series_cache_file: "./series_cache.json"
+
+# Server Configuration
+refresh_interval: 300  # Refresh interval in seconds 
