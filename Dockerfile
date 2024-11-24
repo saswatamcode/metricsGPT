@@ -6,14 +6,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
 
-COPY metricsGPT.py .
-COPY config.yaml .
-COPY LICENSE .
-COPY ui/build ui/build
+COPY Makefile requirements.txt ./
+
+COPY ui/build/ ./ui/build/
+
+COPY . .
+
+RUN make deps
 
 EXPOSE 8081
 
 ENTRYPOINT ["python", "metricsGPT.py"]
+
+CMD ["--server", "--config", "config.yaml"]

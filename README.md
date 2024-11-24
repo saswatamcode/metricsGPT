@@ -6,7 +6,7 @@ Talk to your metrics.
 
 ## Installation
 
-Make sure you have [ollama](https://ollama.com/) installed locally with at least one embedding model and chat-able model pulled, and Python 3.12+.
+Ensure you have Python 3.12+ locally.
 
 By default this tool uses [`llama3`](https://ollama.com/library/llama3) and [`nomic-embed-text`](https://ollama.com/library/nomic-embed-text).
 
@@ -26,15 +26,15 @@ Have some local/remote prometheus up and running. You can use `make run-prom` to
 
 Finally run,
 ```bash
-streamlit run metricsGPT.py
+python3 run metricsGPT.py
 ```
-and ask it to come up with PromQL queries.
+and visit localhost:8081!
+
+Edit config.yaml to suit your own models/Prometheus/Thanos setups.
 
 ## TODOs:
-- Other models, OpenAI etc
 - Use other Prom HTTP APIs for more context
 - Range queries
 - Visualize
 - Embed query results for better analysis
-- Run chromadb separately
-- Refresh chromadb based on last mod
+- Process alerts

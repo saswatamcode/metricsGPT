@@ -12,6 +12,3 @@ ui/node_modules/
 .gitignore
 series_cache.json
 data.db
-pyproject.toml
-dist/
-metricsGPT.egg-info/

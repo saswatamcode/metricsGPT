@@ -376,7 +376,7 @@ class MetricsGPTServer:
             allow_headers=["*"],
         )
         if getattr(sys, "frozen", False):
-            self.build_dir = os.path.join(sys._MEIPASS, "ui/build")
+            self.build_dir = os.path.join(sys._MEIPASS, "ui", "build")
         else:
             self.build_dir = os.path.join(
                 os.path.dirname(__file__), "ui", "build")
@@ -408,6 +408,13 @@ class MetricsGPTServer:
         await self.vector_store_manager.initialize(cache)
 
     def setup_routes(self):
+        if getattr(sys, "frozen", False):
+            # For PyInstaller builds
+            self.build_dir = os.path.join(sys._MEIPASS, "ui", "build")
+        else:
+            # For regular package installation
+            self.build_dir = os.path.join(os.path.dirname(__file__), "ui", "build")
+
         if os.path.exists(self.build_dir):
             self.fastapi_app.mount(
                 "/static",
