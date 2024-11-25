@@ -34,7 +34,7 @@ python3 run metricsGPT.py --server
 ```
 and visit localhost:8081!
 
-## Configuration
+## Configuration
 
 Edit [config.yaml](./config.yaml) to suit your own models/Prometheus/Thanos setups.
 
