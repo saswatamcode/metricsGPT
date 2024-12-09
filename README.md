@@ -7,6 +7,7 @@ Talk to your metrics.
 > [!NOTE]
 >
 > This is a work in progress with no API guarantees. The current implementation needs work on scalability.
+> Right now it will cause quite some load on your Prometheus API.
 
 ## Installation
 
