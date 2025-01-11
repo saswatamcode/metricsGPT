@@ -30,11 +30,12 @@ from llama_index.llms.ollama import Ollama
 from llama_index.llms.openai import OpenAI
 from llama_index.llms.azure_openai import AzureOpenAI
 from llama_index.llms.gemini import Gemini
-from llama_index.llms.ibm.base import WatsonxLLM
+# TODO(saswatamcode): This breaks in poetry, figure out why
+# from llama_index.llms.ibm.base import WatsonxLLM
 from llama_index.embeddings.ollama import OllamaEmbedding
 from llama_index.embeddings.openai import OpenAIEmbedding
 from llama_index.embeddings.azure_openai import AzureOpenAIEmbedding
-from llama_index.embeddings.ibm import WatsonxEmbeddings
+# from llama_index.embeddings.ibm import WatsonxEmbeddings
 
 # TODO(saswatamcode): Split all of these classes into separate modules with tests, and general code quality
 # TODO(saswatamcode): Metrics, token counting, response latencies etc
@@ -624,12 +625,12 @@ def get_llm_from_config(config: dict):
             api_key=llm_config.get("api_key"),
             model=llm_config.get("model", "gemini-pro"),
         )
-    elif provider == "watsonx":
-        return WatsonxLLM(
-            api_key=llm_config.get("api_key"),
-            project_id=llm_config.get("project_id"),
-            model_id=llm_config.get("model_id"),
-        )
+    # elif provider == "watsonx":
+    #     return WatsonxLLM(
+    #         api_key=llm_config.get("api_key"),
+    #         project_id=llm_config.get("project_id"),
+    #         model_id=llm_config.get("model_id"),
+    #     )
     else:
         raise ValueError(f"Unsupported LLM provider: {provider}")
 
@@ -656,12 +657,12 @@ def get_embedding_model_from_config(config: dict):
             azure_endpoint=embed_config.get("endpoint"),
             api_version=embed_config.get("api_version", "2023-05-15"),
         ), dimension
-    elif provider == "watsonx":
-        return WatsonxEmbeddings(
-            api_key=embed_config.get("api_key"),
-            project_id=embed_config.get("project_id"),
-            model_id=embed_config.get("model_id", "google/flan-ul2"),
-        ), dimension
+    # elif provider == "watsonx":
+    #     return WatsonxEmbeddings(
+    #         api_key=embed_config.get("api_key"),
+    #         project_id=embed_config.get("project_id"),
+    #         model_id=embed_config.get("model_id", "google/flan-ul2"),
+    #     ), dimension
     else:
         raise ValueError(f"Unsupported embedding provider: {provider}")
 

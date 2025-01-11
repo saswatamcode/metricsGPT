@@ -7,6 +7,7 @@ Talk to your metrics.
 > [!NOTE]
 >
 > This is a work in progress with no API guarantees. The current implementation needs work on scalability.
+> Right now it will cause quite some load on your Prometheus API and take a while.
 
 ## Installation
 
@@ -19,19 +20,20 @@ ollama pull llama3
 ollama pull nomic-embed-text
 ```
 
-After cloning run,
+Have some prometheus up and running. You can use `make run-prom` to get one running in docker that scrapes itself.
+
+You can choose to grab the CLI from https://pypi.org/project/metricsgpt/
 ```bash
-make venv
-source venv/bin/activate
-pip3 install -r requirements.txt
+pip3 install metricsgpt
+metricsGPT --server --config=config.yaml
 ```
 
-Have some local prometheus up and running. You can use `make run-prom` to get one running in docker that scrapes itself.
-
-Finally run,
+If building locally you can use Poetry,
 ```bash
-python3 run metricsGPT.py --server
+poetry install
+poetry run metricsGPT --server --config=config.yaml
 ```
+
 and visit localhost:8081!
 
 ## Configuration

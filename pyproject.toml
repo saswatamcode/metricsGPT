@@ -1,0 +1,51 @@
+[project]
+name = "metricsgpt"
+version = "0.2.0"
+description = "MetricsGPT is a tool for generating PromQL queries from natural language queries. Talk to your metrics!"
+authors = [
+    {name = "Saswata Mukherjee",email = "saswataminsta@yahoo.com"}
+]
+maintainers = [
+    {name = "Saswata Mukherjee",email = "saswataminsta@yahoo.com"}
+]
+keywords = [ "prometheus", "promql", "metrics", "chat", "llm", "sre", "observability" ]
+readme = "README.md"
+license = { text = "Apache-2.0" }
+
+requires-python = ">=3.12,<4.0"
+dependencies = [
+    "pyyaml (>=6.0.2,<7.0.0)",
+    "uvicorn (>=0.34.0,<0.35.0)",
+    "aioconsole (>=0.8.1,<0.9.0)",
+    "prometheus-api-client (>=0.5.5,<0.6.0)",
+    "colorama (>=0.4.6,<0.5.0)",
+    "fastapi (>=0.115.6,<0.116.0)",
+    "llama-index (>=0.12.10,<0.13.0)",
+    "llama-index-vector-stores-milvus (>=0.5.0,<0.6.0)",
+    "llama-index-llms-ollama (>=0.5.0,<0.6.0)",
+    "llama-index-llms-azure-openai (>=0.3.0,<0.4.0)",
+    "llama-index-llms-gemini (>=0.4.3,<0.5.0)",
+    "llama-index-embeddings-ollama (>=0.5.0,<0.6.0)",
+    "llama-index-embeddings-azure-openai (>=0.3.0,<0.4.0)"
+]
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[project.urls]
+homepage = "https://github.com/saswatamcode/metricsgpt"
+repository = "https://github.com/saswatamcode/metricsgpt"
+documentation = "https://github.com/saswatamcode/metricsgpt"
+
+[project.scripts]
+metricsGPT = "metricsGPT.metricsGPT:runner"
+
+[tool.poetry]
+packages = [
+    {include = "metricsGPT", from = "src/"}
+]
+
+include = [
+    { path = "ui/build/**/*", format=["sdist", "wheel"]}
+]
