@@ -1,6 +1,6 @@
 [project]
 name = "metricsgpt"
-version = "0.2.0"
+version = "0.3.0"
 description = "MetricsGPT is a tool for generating PromQL queries from natural language queries. Talk to your metrics!"
 authors = [
     {name = "Saswata Mukherjee",email = "saswataminsta@yahoo.com"}

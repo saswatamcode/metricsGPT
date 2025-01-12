@@ -163,3 +163,5 @@ data/
 data.db
 series_cache.json
 .data.db.lock
+
+oaiconfig.yaml

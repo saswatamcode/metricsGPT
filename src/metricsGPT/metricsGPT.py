@@ -68,7 +68,7 @@ Assume that the following is a list of metrics that are available to query withi
 {data}
 
 Below is an excerpt of the recent conversation. Understand it, and if the user is asking follow-up questions,
-edit your response accordinly, but do not go beyond the format:
+edit your response accordingly, but do not go beyond the format:
 {chat_history}
 
 And finally here is the user's actual question: {prompt}
@@ -424,6 +424,8 @@ class MetricsGPTServer:
         await self.vector_store_manager.initialize(cache)
 
     def setup_routes(self):
+        self.fastapi_app.post("/chat")(self.chat_endpoint)
+        self.fastapi_app.get("/similar_metrics")(self.similar_metrics_endpoint)
         if os.path.exists(self.build_dir):
             self.fastapi_app.mount(
                 "/static",
@@ -442,8 +444,6 @@ class MetricsGPTServer:
                 return FileResponse(filepath)
             else:
                 return FileResponse(os.path.join(self.build_dir, "index.html"))
-
-        self.fastapi_app.post("/chat")(self.chat_endpoint)
 
     async def refresh_data(self):
         while True:
@@ -474,7 +474,32 @@ class MetricsGPTServer:
                         "Error in refresh_data", extra={
                             "error": str(e)}, exc_info=True)
                     await asyncio.sleep(5)
+                    
+    async def similar_metrics_endpoint(self, request: Request):
+        try:
+            params = request.query_params
+            prompt = params.get("prompt", "")
+            topk = int(params.get("topk", 5))
 
+            if not prompt:
+                return {"error": "Prompt parameter is required"}, 400
+            
+            response = self.embed_model.get_text_embedding(prompt)
+            async with self.vector_store_manager.lock:
+                results = self.vector_store_manager.index.vector_store.query(
+                    VectorStoreQuery(query_embedding=response, similarity_top_k=topk)
+                )
+                series = []
+                for result in results.nodes:
+                    series.append(result.text)
+            
+            return {"series": series}, 200
+        except Exception as e:
+            self.logger.error(
+                "Similar metrics endpoint error", extra={"error": str(e)}, exc_info=True
+            )
+            return {"error": str(e)}, 500
+        
     async def chat_endpoint(self, request: Request):
         try:
             data = await request.json()
