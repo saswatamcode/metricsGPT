@@ -163,6 +163,7 @@ class MetricsCache:
     def __init__(self, cache_file: str, logger: logging.Logger):
         self.cache_file = cache_file
         self.logger = logger
+        self.lock = asyncio.Lock()
 
     def load(self) -> list:
         """Load cached time series from file."""
@@ -186,25 +187,44 @@ class MetricsCache:
                 f"Error saving cache", extra={"error": err}, exc_info=True
             )
 
-    def append(self, series: dict) -> None:
+    async def append(self, series: dict) -> None:
         """Append a series to the cache if not already present."""
-        cache = self.load()
-        if series not in cache:
-            cache.append(series)
-            self.save(cache)
+        async with self.lock:
+            cache = self.load()
+            if series not in cache:
+                cache.append(series)
+                self.save(cache)
+
+    async def append_batch(self, series_batch: list) -> None:
+        """Append a batch of series to the cache, skipping duplicates."""
+        async with self.lock:
+            cache = self.load()
+            # Convert cache to a set of frozen dictionaries for faster lookup
+            cache_set = {frozenset(d.items()) for d in cache}
+            
+            # Find new series that aren't in the cache
+            new_series = [
+                series for series in series_batch 
+                if frozenset(series.items()) not in cache_set
+            ]
+            
+            if new_series:
+                cache.extend(new_series)
+                self.save(cache)
 
 # TODO(saswatamcode): Explore other endpoints like /federate or targets/metadata, so that we can also accept help text and unit.
 # A/C:
 # - Endpoint is actually uniform across most Prom APIs (Prometheus, Thanos, Cortex, AMP, GCM, Grafana)
 # - Endpoint can be called without huge load
 
-#TODO(saswatamcode): Explore if we can do these series calls concurrently or via workers (like goroutines)
 class PrometheusClient:
     """PrometheusClient is a wrapper around the Prometheus API client with some custom methods not available in upstream client."""
 
     def __init__(
             self,
             url: str,
+            metrics_batch_size: int,
+            series_batch_size: int,
             logger: logging.Logger,
             auth_config: dict = None):
         client_kwargs = {
@@ -236,6 +256,8 @@ class PrometheusClient:
                 })
 
         self.client = prometheus_api_client.PrometheusConnect(**client_kwargs)
+        self.metrics_batch_size = metrics_batch_size
+        self.series_batch_size = series_batch_size
         self.logger = logger
 
     async def get_series(self, params: dict = None) -> list:
@@ -257,19 +279,44 @@ class PrometheusClient:
                 response.content})")
 
     async def get_all_series(self, cache_handler: MetricsCache) -> None:
-        """Fetches all metrics and their series from Prometheus."""
+        """Fetches all metrics and their series from Prometheus concurrently in batches."""
         try:
             self.logger.info("Fetching all metrics")
-            for metric in self.client.all_metrics():
-                series_list = await self.get_series(params={"match[]": metric})
-                for series in series_list:
-                    cache_handler.append(series)
+            metrics = self.client.all_metrics()
+            
+            # Limit concurrent requests to Prometheus
+            semaphore = asyncio.Semaphore(10) 
+            
+            chunk_size = self.metrics_batch_size  # Multiple match[] parameters per request
+            chunks = [metrics[i:i + chunk_size] for i in range(0, len(metrics), chunk_size)]
+            
+            async def process_chunk(chunk):
+                async with semaphore:
+                    # Create multiple match[] parameters
+                    params = [("match[]", metric) for metric in chunk]
+                    try:
+                        series_list = await self.get_series(params=params)
+                        if series_list:
+                            # Split into batches
+                            batch_size = self.series_batch_size
+                            batches = [series_list[i:i + batch_size] for i in range(0, len(series_list), batch_size)]
+                            # Process batches concurrently
+                            await asyncio.gather(*[cache_handler.append_batch(batch) for batch in batches])
+                    except Exception as err:
+                        self.logger.error(
+                            f"Error processing chunk", 
+                            extra={"error": err, "chunk": chunk}, 
+                            exc_info=True
+                        )
+            
+            # Process chunks concurrently
+            await asyncio.gather(*[process_chunk(chunk) for chunk in chunks])
+                
         except prometheus_api_client.PrometheusApiClientException as err:
             self.logger.error(
                 f"Error getting series", extra={"error": err}, exc_info=True
             )
 
-# TODO(saswatamcode): Explore if initial insertions can be sped up here, keeping in mind millions/billions metric scale
 # TODO(saswatamcode): Explore possiblity of only updating with new documents and removing old ones based on hashes, instead of dropping table on refresh
 # TODO(saswatamcode): Explore if we need some external Milvus?
 class VectorStoreManager:
@@ -280,6 +327,7 @@ class VectorStoreManager:
             vectordb_path: str,
             embed_model,
             logger: logging.Logger,
+            insert_batch_size: int,
             dimension: int = 768):
         self.vectordb_path = vectordb_path
         self.embed_model = embed_model
@@ -288,7 +336,8 @@ class VectorStoreManager:
         self.lock = asyncio.Lock()
         self.logger = logger
         self.dimension = dimension
-
+        self.insert_batch_size = insert_batch_size
+        
     async def initialize(self, cache: list) -> None:
         """Initialize or load the vector store."""
         self.logger.info("Initializing vector store")
@@ -309,7 +358,12 @@ class VectorStoreManager:
         documents = self._create_documents(cache)
         async with self.lock:
             self.index = VectorStoreIndex.from_documents(
-                documents, storage_context=storage_context, embed_model=self.embed_model)
+                documents, 
+                storage_context=storage_context, 
+                embed_model=self.embed_model, 
+                show_progress=True,
+                insert_batch_size=self.insert_batch_size,
+            )
             self.logger.info("New index created successfully")
 
     async def refresh_embeddings(self, cache: list) -> None:
@@ -326,7 +380,10 @@ class VectorStoreManager:
             collection_name="metrics")
         async with self.lock:
             self.index = VectorStoreIndex.from_vector_store(
-                vector_store=self.vector_store, embed_model=self.embed_model
+                vector_store=self.vector_store, 
+                embed_model=self.embed_model,
+                show_progress=True,
+                insert_batch_size=self.insert_batch_size,
             )
             self.logger.info("Existing index loaded successfully")
 
@@ -390,7 +447,6 @@ class MetricsGPTServer:
             allow_headers=["*"],
         )
         
-        # TODO(saswatamcode): Couldn't get the static files to show up when building with build module. Figure out why?
         if getattr(sys, "frozen", False):
             self.build_dir = os.path.join(sys._MEIPASS, "ui", "build")
         else:
@@ -665,14 +721,18 @@ def get_embedding_model_from_config(config: dict):
     embed_config = config.get("embedding", {})
     provider = embed_config.get("provider", "ollama")
     dimension = embed_config.get("dimension", 768)
-
+    embed_batch_size = config.get("embed_batch_size", 1000)
+    
     if provider == "ollama":
         return OllamaEmbedding(
-            model_name=embed_config.get("model", "nomic-embed-text")), dimension
+            model_name=embed_config.get("model", "nomic-embed-text"),
+            embed_batch_size=embed_batch_size
+        ), dimension
     elif provider == "openai":
         return OpenAIEmbedding(
             api_key=embed_config.get("api_key"),
             model=embed_config.get("model", "text-embedding-3-small"),
+            embed_batch_size=embed_batch_size
         ), dimension
     elif provider == "azure":
         return AzureOpenAIEmbedding(
@@ -681,12 +741,14 @@ def get_embedding_model_from_config(config: dict):
             api_key=embed_config.get("api_key"),
             azure_endpoint=embed_config.get("endpoint"),
             api_version=embed_config.get("api_version", "2023-05-15"),
+            embed_batch_size=embed_batch_size
         ), dimension
     # elif provider == "watsonx":
     #     return WatsonxEmbeddings(
     #         api_key=embed_config.get("api_key"),
     #         project_id=embed_config.get("project_id"),
     #         model_id=embed_config.get("model_id", "google/flan-ul2"),
+    #         embed_batch_size=embed_batch_size
     #     ), dimension
     else:
         raise ValueError(f"Unsupported embedding provider: {provider}")
@@ -729,6 +791,10 @@ async def main():
         "refresh_interval": int(config.get("refresh_interval", 300)),
         "server_host": config.get("server_host", "0.0.0.0"),
         "server_port": int(config.get("server_port", 8081)),
+        "embed_batch_size": int(config.get("embed_batch_size", 1000)),
+        "insert_batch_size": int(config.get("insert_batch_size", 10000)),
+        "metrics_batch_size": int(config.get("metrics_batch_size", 100)),
+        "series_batch_size": int(config.get("series_batch_size", 1000)),
     }
 
     # Initialize LLM and embedding model from config
@@ -738,7 +804,9 @@ async def main():
     prometheus = PrometheusClient(
         settings["prometheus_url"],
         create_logger("prometheus"),
-        settings["prometheus_auth"]
+        settings["prometheus_auth"],
+        settings["metrics_batch_size"],
+        settings["series_batch_size"]   
     )
     metrics_cache = MetricsCache(
         settings["series_cache_file"], create_logger("metrics_cache")
@@ -747,6 +815,7 @@ async def main():
         settings["vectordb_path"],
         Settings.embed_model,
         create_logger("vector_store_manager"),
+        insert_batch_size=settings["insert_batch_size"],
         dimension=embed_dimension
     )
 
