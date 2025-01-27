@@ -803,10 +803,10 @@ async def main():
 
     prometheus = PrometheusClient(
         settings["prometheus_url"],
+        settings["metrics_batch_size"],
+        settings["series_batch_size"],
         create_logger("prometheus"),
         settings["prometheus_auth"],
-        settings["metrics_batch_size"],
-        settings["series_batch_size"]   
     )
     metrics_cache = MetricsCache(
         settings["series_cache_file"], create_logger("metrics_cache")
