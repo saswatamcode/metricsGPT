@@ -27,6 +27,12 @@ query_lookback_hours: 1.0
 vectordb_path: "./data.db"
 series_cache_file: "./series_cache.json"
 
+# Batch sizes for insertions
+embed_batch_size: 1000
+insert_batch_size: 10000
+metrics_batch_size: 100
+series_batch_size: 1000
+
 # Server Configuration
 refresh_interval: 900  # VectorDB Refresh interval in seconds 
 server_host: "0.0.0.0"
